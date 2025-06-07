@@ -1,85 +1,143 @@
 import sqlglot
-from sqlglot.expressions import Column, Table
+from sqlglot.expressions import Column, Table, Expression, Star, Subquery
 import pandas as pd
 
-def extract_column_usage(sql):
+def extract_column_usage_full(sql):
     parsed = sqlglot.parse_one(sql)
     results = []
+    seen = set()
 
-    # Step 1: Collect CTE definitions
     cte_definitions = {}
+    cte_sources = {}
+
+    # Step 1: Collect CTE definitions and their table sources
     if parsed.args.get("with"):
         for cte in parsed.args["with"].expressions:
             cte_name = cte.alias
             cte_definitions[cte_name] = cte.this
+            sources = {}
+            for table in cte.this.find_all(Table):
+                alias = table.alias_or_name
+                sources[alias] = table.name
+            cte_sources[cte_name] = sources
 
-    # Step 2: Recursive helper to process expressions
+    # Step 2: Detect where the column is used
+    def get_column_location(expr):
+        parent = expr.parent
+        while parent:
+            if isinstance(parent, Expression):
+                if parent.key == "expressions" and parent.__class__.__name__ == "Select":
+                    return "SELECT"
+                if parent.key == "on":
+                    return "JOIN"
+                if parent.key == "where":
+                    return "WHERE"
+                if parent.key in ("group", "group_by"):
+                    return "GROUP_BY"
+                if parent.key in ("order", "order_by"):
+                    return "ORDER_BY"
+                if parent.key == "having":
+                    return "HAVING"
+            parent = parent.parent
+        return "UNKNOWN"
+
+    # Step 3: Process expression blocks (CTE, subquery, or main)
     def process_expression(expr, source_level, outer_aliases=None):
         table_aliases = outer_aliases or {}
 
-        # Resolve table aliases
         for table in expr.find_all(Table):
-            table_name = table.name
             alias = table.alias_or_name
-            table_aliases[alias] = table_name
+            table_aliases[alias] = table.name
 
-        # Column usage
+        # Handle SELECT * or table.*
+        for star in expr.find_all(Star):
+            table_ref = star.this or "UNKNOWN"
+            resolved_table = table_aliases.get(table_ref, table_ref)
+
+            location = get_column_location(star)
+            key = (resolved_table, "*", location, source_level)
+            if key not in seen:
+                seen.add(key)
+                results.append({
+                    "table_name": resolved_table,
+                    "column_name": "*",
+                    "column_location": location,
+                    "source_level": source_level
+                })
+
+        # Handle all named columns
         for col in expr.find_all(Column):
             column_name = col.name
             table_ref = col.table
             resolved_table = table_aliases.get(table_ref, table_ref)
 
-            # Detect context
-            location = "UNKNOWN"
-            parent = col.parent
-            while parent:
-                if parent.args.get("expressions"):
-                    location = "SELECT"
-                    break
-                elif parent.key == "on":
-                    location = "JOIN"
-                    break
-                elif parent.key == "where":
-                    location = "WHERE"
-                    break
-                parent = parent.parent
+            # Map to source table if CTE
+            if resolved_table in cte_sources:
+                inner_map = cte_sources[resolved_table]
+                resolved_table = list(inner_map.values())[0] if inner_map else resolved_table
 
-            results.append({
-                "table_name": resolved_table,
-                "column_name": column_name,
-                "column_location": location,
-                "source_level": source_level
-            })
+            location = get_column_location(col)
+            key = (resolved_table, column_name, location, source_level)
+            if key not in seen:
+                seen.add(key)
+                results.append({
+                    "table_name": resolved_table,
+                    "column_name": column_name,
+                    "column_location": location,
+                    "source_level": source_level
+                })
 
-        # Process nested CTEs if any
+        # Recurse into CTEs if any
         if expr.args.get("with"):
             for inner_cte in expr.args["with"].expressions:
-                cte_name = inner_cte.alias
-                cte_definitions[cte_name] = inner_cte.this
+                inner_name = inner_cte.alias
+                cte_definitions[inner_name] = inner_cte.this
+                sources = {}
+                for table in inner_cte.this.find_all(Table):
+                    alias = table.alias_or_name
+                    sources[alias] = table.name
+                cte_sources[inner_name] = sources
                 process_expression(inner_cte.this, source_level="CTE", outer_aliases=table_aliases.copy())
 
-    # Step 3: Process CTEs
+        # Recurse into subqueries
+        for subquery in expr.find_all(Subquery):
+            process_expression(subquery, source_level=source_level, outer_aliases=table_aliases.copy())
+
+    # Step 4: Process all CTEs and main block
     for cte_expr in cte_definitions.values():
         process_expression(cte_expr, source_level="CTE")
-
-    # Step 4: Process main query
     process_expression(parsed, source_level="MAIN")
 
-    return pd.DataFrame(results)
-sql = """
-WITH recent_orders AS (
-    SELECT order_id, customer_id, order_date
-    FROM orders
-    WHERE order_date > '2023-01-01'
-),
-customer_info AS (
-    SELECT customer_id, customer_name
-    FROM customers
-)
-SELECT r.order_id, c.customer_name
-FROM recent_orders r
-JOIN customer_info c ON r.customer_id = c.customer_id
-"""
+    # Step 5: Combine multiple locations per column
+    df = pd.DataFrame(results)
+    df_grouped = (
+        df.groupby(["table_name", "column_name", "source_level"])["column_location"]
+        .apply(lambda x: ",".join(sorted(set(x))))
+        .reset_index()
+    )
+    return df_grouped
 
-df = extract_column_usage(sql)
-print(df)
+# ========== ✅ Example Usage ==========
+
+if __name__ == "__main__":
+    sql = """
+    WITH orders_cte AS (
+        SELECT * FROM orders WHERE order_date >= '2023-01-01'
+    )
+    SELECT c.customer_name, sub.total
+    FROM customers c
+    JOIN (
+        SELECT customer_id, SUM(amount) as total
+        FROM orders_cte
+        GROUP BY customer_id
+        HAVING SUM(amount) > 1000
+    ) sub ON c.customer_id = sub.customer_id
+    WHERE c.region = 'East'
+    ORDER BY sub.total DESC
+    """
+
+    df = extract_column_usage_full(sql)
+    print(df)
+
+    # Optional: save to Excel
+    df.to_excel("column_lineage_final.xlsx", index=False)
