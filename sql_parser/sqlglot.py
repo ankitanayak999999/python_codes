@@ -1,43 +1,66 @@
 import sqlglot
 from sqlglot.expressions import Table, Column, CTE
 import pandas as pd
+import re
 
-def extract_cte_names(parsed):
-    return {cte.alias_or_name.lower() for cte in parsed.find_all(CTE)}
+def remove_sql_comments(sql_text):
+    """Remove single-line and multi-line comments from SQL."""
+    sql_text = re.sub(r'--.*?$', '', sql_text, flags=re.MULTILINE)
+    sql_text = re.sub(r'/\*.*?\*/', '', sql_text, flags=re.DOTALL)
+    return sql_text
 
-def extract_used_columns(parsed, cte_names):
+def extract_ctes_and_sources(parsed):
+    """Map CTE names to their source base tables."""
+    cte_table_map = {}
+    for cte in parsed.find_all(CTE):
+        cte_name = cte.alias_or_name.lower()
+        inner_tables = {
+            t.name.lower() for t in cte.this.find_all(Table)
+        }
+        cte_table_map[cte_name] = inner_tables
+    return cte_table_map
+
+def extract_used_columns(parsed, cte_table_map):
+    """Extract used columns from base tables (trace through CTEs)."""
     used_columns = set()
-    base_tables = set()
-
-    for table in parsed.find_all(Table):
-        table_name = table.name.lower()
-        if table_name not in cte_names:
-            base_tables.add(table.alias_or_name or table.name)
+    base_tables = {
+        (t.alias_or_name or t.name).lower(): t.name.lower()
+        for t in parsed.find_all(Table)
+    }
 
     for col in parsed.find_all(Column):
-        table = col.table or ''
-        column = col.name
-        if table:
-            used_columns.add((table.lower(), column))
+        table_alias = (col.table or "").lower()
+        column_name = col.name
+
+        if table_alias:
+            # If alias is a CTE → resolve to its source base tables
+            if table_alias in cte_table_map:
+                for base_table in cte_table_map[table_alias]:
+                    used_columns.add((base_table, column_name))
+            else:
+                resolved_table = base_tables.get(table_alias, table_alias)
+                used_columns.add((resolved_table, column_name))
         elif len(base_tables) == 1:
-            only_table = list(base_tables)[0]
-            used_columns.add((only_table.lower(), column))
+            # Single-table query, unqualified column → assign directly
+            only_table = list(base_tables.values())[0]
+            used_columns.add((only_table, column_name))
 
     return used_columns
 
 def process_sql_file(file_path):
-    all_results = set()
-
+    """Main function to process a SQL file and return table-column usage."""
     with open(file_path, 'r') as f:
-        sql_text = f.read()
+        raw_sql = f.read()
 
-    queries = sqlglot.parse(sql_text)
+    clean_sql = remove_sql_comments(raw_sql)
+    queries = sqlglot.parse(clean_sql)
+
+    all_used = set()
 
     for parsed in queries:
-        cte_names = extract_cte_names(parsed)
-        used_columns = extract_used_columns(parsed, cte_names)
-        all_results.update(used_columns)
+        cte_table_map = extract_ctes_and_sources(parsed)
+        used = extract_used_columns(parsed, cte_table_map)
+        all_used.update(used)
 
-    # Convert to DataFrame
-    df = pd.DataFrame(sorted(all_results), columns=["Table Name", "Column Name"])
+    df = pd.DataFrame(sorted(all_used), columns=["TABLE_NAME", "COLUMN_NAME"])
     return df
