@@ -30,19 +30,7 @@ def extract_table_column_pairs(sql_text):
 
 # EXAMPLE USAGE
 sql = """
-WITH temp AS (
-  SELECT * FROM ENTP_PREPRD_DL_DB.ENTP_PL_SCH.PL_DEPOSIT_ACCOUNT
-  WHERE AS_OF_DATE = (SELECT MAX(AS_OF_DATE) 
-                      FROM ENTP_PREPRD_DL_DB.ENTP_PL_SCH.PL_DEPOSIT_ACCOUNT)
-)
-SELECT
-  A.EXTERNAL_IDENTIFIER,
-  A.ID,
-  B.TD_ACCT_NBR
-FROM temp A
-JOIN ENTP_PRD_LNDG_DB.ENTP_FIS_SCH.TB_DP_OZP_TD_ARD B
-  ON A.EXTERNAL_IDENTIFIER = B.TD_ID
-WHERE A.ID IS NOT NULL;
+
 """
 
 df_result = extract_table_column_pairs(sql)
