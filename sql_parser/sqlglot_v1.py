@@ -6,11 +6,12 @@ def extract_column_usage_full(sql):
     parsed = sqlglot.parse_one(sql)
     results = []
     seen = set()
+    processed_nodes = set()  # Prevent infinite recursion
 
     cte_definitions = {}
     cte_sources = {}
 
-    # Step 1: Collect CTE definitions and their table sources
+    # Step 1: Collect CTEs and their source tables
     if parsed.args.get("with"):
         for cte in parsed.args["with"].expressions:
             cte_name = cte.alias
@@ -21,7 +22,7 @@ def extract_column_usage_full(sql):
                 sources[alias] = table.name
             cte_sources[cte_name] = sources
 
-    # Step 2: Detect where the column is used
+    # Step 2: Determine where a column is used
     def get_column_location(expr):
         parent = expr.parent
         while parent:
@@ -41,10 +42,15 @@ def extract_column_usage_full(sql):
             parent = parent.parent
         return "UNKNOWN"
 
-    # Step 3: Process expression blocks (CTE, subquery, or main)
+    # Step 3: Main recursive logic
     def process_expression(expr, source_level, outer_aliases=None):
+        if id(expr) in processed_nodes:
+            return
+        processed_nodes.add(id(expr))
+
         table_aliases = outer_aliases or {}
 
+        # Register table aliases
         for table in expr.find_all(Table):
             alias = table.alias_or_name
             table_aliases[alias] = table.name
@@ -53,7 +59,6 @@ def extract_column_usage_full(sql):
         for star in expr.find_all(Star):
             table_ref = star.this or "UNKNOWN"
             resolved_table = table_aliases.get(table_ref, table_ref)
-
             location = get_column_location(star)
             key = (resolved_table, "*", location, source_level)
             if key not in seen:
@@ -65,13 +70,11 @@ def extract_column_usage_full(sql):
                     "source_level": source_level
                 })
 
-        # Handle all named columns
+        # Handle named columns
         for col in expr.find_all(Column):
             column_name = col.name
             table_ref = col.table
             resolved_table = table_aliases.get(table_ref, table_ref)
-
-            # Map to source table if CTE
             if resolved_table in cte_sources:
                 inner_map = cte_sources[resolved_table]
                 resolved_table = list(inner_map.values())[0] if inner_map else resolved_table
@@ -87,7 +90,7 @@ def extract_column_usage_full(sql):
                     "source_level": source_level
                 })
 
-        # Recurse into CTEs if any
+        # Recurse into inner CTEs
         if expr.args.get("with"):
             for inner_cte in expr.args["with"].expressions:
                 inner_name = inner_cte.alias
@@ -103,12 +106,12 @@ def extract_column_usage_full(sql):
         for subquery in expr.find_all(Subquery):
             process_expression(subquery, source_level=source_level, outer_aliases=table_aliases.copy())
 
-    # Step 4: Process all CTEs and main block
+    # Step 4: Process all expressions
     for cte_expr in cte_definitions.values():
         process_expression(cte_expr, source_level="CTE")
     process_expression(parsed, source_level="MAIN")
 
-    # Step 5: Combine multiple locations per column
+    # Step 5: Merge column usage by location
     df = pd.DataFrame(results)
     df_grouped = (
         df.groupby(["table_name", "column_name", "source_level"])["column_location"]
@@ -139,5 +142,5 @@ if __name__ == "__main__":
     df = extract_column_usage_full(sql)
     print(df)
 
-    # Optional: save to Excel
+    # Save to Excel
     df.to_excel("column_lineage_final.xlsx", index=False)
