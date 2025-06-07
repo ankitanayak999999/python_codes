@@ -2,31 +2,33 @@ import sqlglot
 from sqlglot.expressions import Column, Table, Expression, Star, Subquery
 import pandas as pd
 
-def extract_column_usage_with_fixed_cte(sql):
+def extract_column_usage_corrected(sql):
     parsed = sqlglot.parse_one(sql)
     results = []
     seen = set()
     processed_nodes = set()
-    cte_sources = {}
-
-    # Step 1: Capture CTEs and their source tables
     cte_definitions = {}
+    cte_to_base_table = {}
+
+    # Step 1: Capture CTEs and resolve their source tables
     if parsed.args.get("with"):
         for cte in parsed.args["with"].expressions:
             cte_name = cte.alias
-            cte_definitions[cte_name] = cte.this
-            sources = {}
-            for table in cte.this.find_all(Table):
-                alias = table.alias_or_name
-                sources[alias] = table.name
-            cte_sources[cte_name] = sources
+            cte_expr = cte.this
+            cte_definitions[cte_name] = cte_expr
 
-    # Step 2: Determine column usage location
+            tables = list(cte_expr.find_all(Table))
+            if tables:
+                base_table = tables[0].name  # Assume single base table
+                cte_to_base_table[cte_name] = base_table
+
+    # Step 2: Determine usage location
     def get_column_location(expr):
         parent = expr.parent
         while parent:
             if isinstance(parent, Expression):
-                if parent.key == "expressions" and parent.__class__.__name__ == "Select":
+                class_name = parent.__class__.__name__.lower()
+                if parent.key == "expressions" and class_name == "select":
                     return "SELECT"
                 if parent.key == "on":
                     return "JOIN"
@@ -41,7 +43,7 @@ def extract_column_usage_with_fixed_cte(sql):
             parent = parent.parent
         return "UNKNOWN"
 
-    # Step 3: Parse expressions recursively
+    # Step 3: Process SQL tree
     def process_expression(expr, source_level, outer_aliases=None):
         if id(expr) in processed_nodes:
             return
@@ -55,6 +57,7 @@ def extract_column_usage_with_fixed_cte(sql):
         for star in expr.find_all(Star):
             table_ref = star.this or "UNKNOWN"
             resolved_table = table_aliases.get(table_ref, table_ref)
+            resolved_table = cte_to_base_table.get(resolved_table, resolved_table)
             location = get_column_location(star)
             key = (resolved_table, "*", location, source_level)
             if key not in seen:
@@ -70,11 +73,7 @@ def extract_column_usage_with_fixed_cte(sql):
             column_name = col.name
             table_ref = col.table
             resolved_table = table_aliases.get(table_ref, table_ref)
-
-            if resolved_table in cte_sources:
-                inner_map = cte_sources[resolved_table]
-                resolved_table = list(inner_map.values())[0] if inner_map else resolved_table
-
+            resolved_table = cte_to_base_table.get(resolved_table, resolved_table)
             location = get_column_location(col)
             key = (resolved_table, column_name, location, source_level)
             if key not in seen:
@@ -89,13 +88,13 @@ def extract_column_usage_with_fixed_cte(sql):
         for subquery in expr.find_all(Subquery):
             process_expression(subquery, source_level, table_aliases.copy())
 
-    # Step 4: Process all CTEs and then the main query
-    for cte_name, cte_expr in cte_definitions.items():
+    # Step 4: Process CTEs and Main
+    for cte_expr in cte_definitions.values():
         process_expression(cte_expr, "CTE")
 
     process_expression(parsed, "MAIN")
 
-    # Step 5: Group and combine column locations
+    # Step 5: Group and merge
     df = pd.DataFrame(results)
     df_grouped = (
         df.groupby(["table_name", "column_name", "source_level"])["column_location"]
@@ -104,8 +103,7 @@ def extract_column_usage_with_fixed_cte(sql):
     )
     return df_grouped
 
-# ========== ✅ Example SQL ==========
-
+# ========= ✅ Test SQL =========
 if __name__ == "__main__":
     sql = """
     WITH recent_orders AS (
@@ -117,6 +115,6 @@ if __name__ == "__main__":
     WHERE c.region = 'East'
     """
 
-    df = extract_column_usage_with_fixed_cte(sql)
+    df = extract_column_usage_corrected(sql)
     print(df)
-    df.to_excel("column_lineage_cte_where_fixed.xlsx", index=False)
+    df.to_excel("corrected_column_lineage.xlsx", index=False)
