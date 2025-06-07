@@ -4,12 +4,13 @@ import pandas as pd
 import re
 
 def remove_sql_comments(sql_text):
+    """Remove -- and /* */ comments from SQL."""
     sql_text = re.sub(r'--.*?$', '', sql_text, flags=re.MULTILINE)
     sql_text = re.sub(r'/\*.*?\*/', '', sql_text, flags=re.DOTALL)
     return sql_text
 
 def extract_cte_definitions(parsed):
-    """Return dict of CTE name → base tables it uses."""
+    """Map CTE names to the base tables used inside them."""
     cte_sources = {}
     for cte in parsed.find_all(CTE):
         cte_name = cte.alias_or_name.lower()
@@ -18,11 +19,11 @@ def extract_cte_definitions(parsed):
     return cte_sources
 
 def extract_columns_from_base_tables(parsed, cte_sources):
+    """Trace used columns back to original base tables."""
     used = set()
     alias_to_table = {}
     cte_names = set(cte_sources.keys())
 
-    # Map alias → actual table (or CTE)
     for table in parsed.find_all(Table):
         alias = (table.alias_or_name or table.name).lower()
         actual_name = table.name.lower()
@@ -30,12 +31,12 @@ def extract_columns_from_base_tables(parsed, cte_sources):
 
     for col in parsed.find_all(Column):
         col_name = col.name
+        if col_name == "*":
+            continue  # ignore unqualified SELECT *
         table_alias = (col.table or "").lower()
 
         if table_alias in alias_to_table:
             actual = alias_to_table[table_alias]
-
-            # Trace back if CTE
             if actual in cte_names:
                 for real_base in cte_sources[actual]:
                     used.add((real_base, col_name))
@@ -49,13 +50,14 @@ def extract_columns_from_base_tables(parsed, cte_sources):
     return used
 
 def process_sql_file(file_path):
+    """Main function: clean, parse, extract used columns from real tables."""
     with open(file_path, 'r') as f:
         sql = f.read()
 
     clean_sql = remove_sql_comments(sql)
     queries = sqlglot.parse(clean_sql)
-
     final_used = set()
+
     for parsed in queries:
         cte_sources = extract_cte_definitions(parsed)
         used = extract_columns_from_base_tables(parsed, cte_sources)
