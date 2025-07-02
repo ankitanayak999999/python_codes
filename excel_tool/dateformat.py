@@ -46,5 +46,31 @@ def convert_date_columns(df):
         except Exception:
             pass  # Safe fallback
     return df
+    import pandas as pd
+import warnings
 
+def convert_date_columns(df):
+    # Define allowed date-like keywords in column names
+    date_keywords = ['DATE', 'DT', 'DTE', 'DTTM', 'TIME', 'TS', 'TIMESTAMP']
+
+    for col in df.columns:
+        col_upper = col.upper()
+
+        # Only convert if column name contains any date keyword
+        if not any(keyword in col_upper for keyword in date_keywords):
+            continue  # Skip this column
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter(action='ignore', category=UserWarning)
+                converted = pd.to_datetime(df[col], errors='coerce')
+
+            non_nulls = df[col].notna().sum()
+            if non_nulls > 0 and converted.notna().sum() / non_nulls >= 0.7:
+                df[col] = converted.dt.strftime('%Y-%m-%d')
+                print(f"✅ Converted column to date format: {col}")
+
+        except Exception:
+            pass
+    return df
 
