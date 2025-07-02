@@ -72,5 +72,40 @@ def convert_date_columns(df):
 
         except Exception:
             pass
+    return df 
+    
+    import pandas as pd
+import warnings
+
+def convert_date_columns(df):
+    # Define column name keywords that likely indicate date/datetime columns
+    date_keywords = ['DATE', 'DT', 'DTE', 'DTTM', 'TIME', 'TS', 'TIMESTAMP']
+
+    for col in df.columns:
+        col_upper = col.upper()
+
+        # Only proceed if column name contains a date-related keyword
+        if not any(keyword in col_upper for keyword in date_keywords):
+            continue
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter(action='ignore', category=UserWarning)
+                converted = pd.to_datetime(df[col], errors='coerce')
+
+            non_nulls = df[col].notna().sum()
+            valid_dates = converted.notna().sum()
+
+            # Convert only if enough values look like dates
+            if non_nulls > 0 and valid_dates / non_nulls >= 0.7:
+                # Force format even for large dates like 9999-12-31
+                df[col] = converted.dt.strftime('%Y-%m-%d')
+                print(f"✅ Converted column to date format: {col}")
+
+        except Exception as e:
+            print(f"⚠️ Skipped {col} due to error: {e}")
+            continue
+
     return df
+
 
