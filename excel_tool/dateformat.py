@@ -28,4 +28,23 @@ def df_clean(df):
 
     # Clean up line breaks and tabs across entire DataFrame
     df = df.replace(r'\r|\n|\r\n|\t+', ' ', regex=True)
-    return dfthe
+    return df
+import pandas as pd
+
+def convert_date_columns(df):
+    for col in df.columns:
+        try:
+            # Attempt to convert the column to datetime
+            converted = pd.to_datetime(df[col], errors='coerce')
+
+            # Only update if at least 70% of non-null values are valid dates
+            non_nulls = df[col].notna().sum()
+            if non_nulls > 0 and converted.notna().sum() / non_nulls >= 0.7:
+                # Format all valid dates to 'YYYY-MM-DD'
+                df[col] = converted.dt.strftime('%Y-%m-%d')
+                print(f"✅ Converted column to date format: {col}")
+        except Exception:
+            pass  # Safe fallback
+    return df
+
+
