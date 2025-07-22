@@ -34,7 +34,22 @@ def find_table_in_row(row):
     return ", ".join(found_tables) if found_tables else "NOT FOUND"
 
 # Apply function to each row (only using the selected columns for comparison)
-df2['MatchedTables'] = df2.apply(find_table_in_row, axis=1)
+df2['MatchedTables'] = df2.apply(find_table_in_row, axis=import re
+
+def find_table_in_row(row):
+    found_tables = []
+    # Combine selected columns into a single string (uppercase)
+    row_text = " ".join([str(row[col]).upper() for col in columns_to_check if pd.notna(row[col])])
+    
+    for table in table_list:
+        # Match table name, but ensure no underscore before or after
+        pattern = r'(?<!_)' + re.escape(table) + r'(?!_)'
+        if re.search(pattern, row_text):
+            found_tables.append(table)
+    
+    return ", ".join(found_tables) if found_tables else None
+
+
 
 # Save updated File 2
 df2.to_excel(output_file, index=False)
