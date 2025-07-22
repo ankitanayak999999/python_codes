@@ -10,4 +10,17 @@ connection_parameters = {
     "authenticator": "externalbrowser"
 }
 
-session = Session.builder.configs(connection_parameters).create()
+session = Session.builder.configs(connection_parameters).import snowflake.connector
+
+conn = snowflake.connector.connect(
+    user='USER',
+    account='ACCOUNT',
+    authenticator='externalbrowser',
+    warehouse='WH',
+    database='DB',
+    schema='SCHEMA'
+)
+cur = conn.cursor()
+cur.execute("SELECT * FROM MY_TABLE LIMIT 10")
+for row in cur:
+    print(row)
