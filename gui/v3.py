@@ -25,98 +25,71 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
             widget.destroy()
         dynamic_widgets.clear()
 
-    def build_fields(field_list, start_row=0):
+    def render_file_input(row, label_text, fg_color, target_dict, parent="static"):
+        tk.Label(root, text=label_text, fg=fg_color).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        file_frame = tk.Frame(root)
+        file_frame.grid(row=row, column=1, padx=5, pady=5, sticky="w")
+
+        entry = tk.Entry(file_frame, width=60)
+        entry.grid(row=0, column=0, sticky="w")
+
+        btn = tk.Button(file_frame, text="Browse", command=lambda e=entry: browse_file(e))
+        btn.grid(row=0, column=1, padx=(5, 0), sticky="w")
+
+        if parent == "dynamic":
+            dynamic_widgets.extend([file_frame, entry, btn])
+        target_dict[label_text.rstrip(" *")] = entry
+
+    def build_fields(field_list, start_row=0, parent="static"):
         for i, field in enumerate(field_list):
             row = start_row + i
             label_text = f"{field['label']} *" if field.get("required") else field["label"]
             fg_color = "red" if field.get("required") else "black"
 
-            tk.Label(root, text=label_text, fg=fg_color)\
-                .grid(row=row, column=0, padx=5, pady=5, sticky="w")
-
             ftype = field.get("type", "text")
 
-            if ftype == "text":
-                entry = tk.Entry(root, width=70)
-                entry.grid(row=row, column=1, padx=5, pady=5, sticky="w")
-                entries[field["label"]] = entry
+            if ftype == "file":
+                render_file_input(row, label_text, fg_color, entries, parent)
 
-            elif ftype == "file":
-                entry = tk.Entry(root, width=60)
-                entry.grid(row=row, column=1, padx=5, pady=5, sticky="w")
-                btn = tk.Button(root, text="Browse", command=lambda e=entry: browse_file(e))
-                btn.grid(row=row, column=2, padx=5, pady=5, sticky="w")
-                entries[field["label"]] = entry
+            else:
+                tk.Label(root, text=label_text, fg=fg_color).grid(row=row, column=0, padx=5, pady=5, sticky="w")
 
-            elif ftype == "dropdown":
-                var = tk.StringVar()
-                combo = ttk.Combobox(root, textvariable=var, values=field.get("options", []), width=67, state="readonly")
-                combo.grid(row=row, column=1, padx=5, pady=5, sticky="w")
-                entries[field["label"]] = combo
+                if ftype == "text":
+                    entry = tk.Entry(root, width=70)
+                    entry.grid(row=row, column=1, padx=5, pady=5, sticky="w")
+                    if parent == "dynamic":
+                        dynamic_widgets.append(entry)
+                    entries[field["label"]] = entry
 
-            elif ftype == "radio":
-                var = tk.StringVar()
-                radio_frame = tk.Frame(root)
-                radio_frame.grid(row=row, column=1, padx=5, pady=5, sticky="w")
-                for opt in field.get("options", []):
-                    rb = tk.Radiobutton(radio_frame, text=opt, variable=var, value=opt)
-                    rb.pack(side="left", padx=10)
-                if field.get("options"):
-                    var.set(field["options"][0])
-                entries[field["label"]] = var
+                elif ftype == "dropdown":
+                    var = tk.StringVar()
+                    combo = ttk.Combobox(root, textvariable=var, values=field.get("options", []), width=67, state="readonly")
+                    combo.grid(row=row, column=1, padx=5, pady=5, sticky="w")
+                    if parent == "dynamic":
+                        dynamic_widgets.append(combo)
+                    entries[field["label"]] = combo
 
-    def build_dynamic_fields(selection):
-        clear_dynamic_fields()
-        fields = dynamic_field_map.get(selection, [])
-        for i, field in enumerate(fields):
-            row = row_counter[0] + i
-            label_text = f"{field['label']} *" if field.get("required") else field["label"]
-            fg_color = "red" if field.get("required") else "black"
+                elif ftype == "radio":
+                    var = tk.StringVar()
+                    radio_frame = tk.Frame(root)
+                    radio_frame.grid(row=row, column=1, padx=5, pady=5, sticky="w")
+                    for opt in field.get("options", []):
+                        rb = tk.Radiobutton(radio_frame, text=opt, variable=var, value=opt)
+                        rb.pack(side="left", padx=10)
+                    if field.get("options"):
+                        var.set(field["options"][0])
+                    if parent == "dynamic":
+                        dynamic_widgets.append(radio_frame)
+                    entries[field["label"]] = var
 
-            label = tk.Label(root, text=label_text, fg=fg_color)
-            label.grid(row=row, column=0, padx=5, pady=5, sticky="w")
-            dynamic_widgets.append(label)
-
-            ftype = field.get("type", "text")
-
-            if ftype == "text":
-                entry = tk.Entry(root, width=70)
-                entry.grid(row=row, column=1, padx=5, pady=5, sticky="w")
-                dynamic_widgets.append(entry)
-                entries[field["label"]] = entry
-
-            elif ftype == "file":
-                entry = tk.Entry(root, width=60)
-                entry.grid(row=row, column=1, padx=5, pady=5, sticky="w")
-                btn = tk.Button(root, text="Browse", command=lambda e=entry: browse_file(e))
-                btn.grid(row=row, column=2, padx=5, pady=5, sticky="w")
-                dynamic_widgets.extend([entry, btn])
-                entries[field["label"]] = entry
-
-            elif ftype == "dropdown":
-                var = tk.StringVar()
-                combo = ttk.Combobox(root, textvariable=var, values=field.get("options", []), width=67, state="readonly")
-                combo.grid(row=row, column=1, padx=5, pady=5, sticky="w")
-                dynamic_widgets.append(combo)
-                entries[field["label"]] = combo
-
-            elif ftype == "radio":
-                var = tk.StringVar()
-                radio_frame = tk.Frame(root)
-                radio_frame.grid(row=row, column=1, padx=5, pady=5, sticky="w")
-                for opt in field.get("options", []):
-                    rb = tk.Radiobutton(radio_frame, text=opt, variable=var, value=opt)
-                    rb.pack(side="left", padx=10)
-                if field.get("options"):
-                    var.set(field["options"][0])
-                dynamic_widgets.append(radio_frame)
-                entries[field["label"]] = var
-
-        row_counter[0] += len(fields)
+        if parent == "dynamic":
+            row_counter[0] += len(field_list)
 
     def on_controller_change(event=None):
         selected = controller_var.get()
-        build_dynamic_fields(selected)
+        clear_dynamic_fields()
+        if dynamic_field_map:
+            build_fields(dynamic_field_map.get(selected, []), start_row=row_counter[0], parent="dynamic")
 
     def submit():
         if controller_field:
@@ -128,9 +101,8 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
                 result[label] = widget.get()
         root.destroy()
 
-    # --- Build UI ---
+    # --- BUILD UI ---
     if controller_field:
-        # Row 0: Controller dropdown
         tk.Label(root, text=controller_field["label"] + (" *" if controller_field.get("required") else ""), fg="red")\
             .grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
@@ -138,16 +110,14 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
         dropdown = ttk.Combobox(root, textvariable=controller_var, values=controller_field["options"], width=67, state="readonly")
         dropdown.grid(row=0, column=1, padx=5, pady=5, sticky="w")
         dropdown.bind("<<ComboboxSelected>>", on_controller_change)
-        row_counter[0] = 1  # next row for dynamic fields
+        row_counter[0] = 1  # Start row for dynamic fields
     else:
-        build_fields(fields or [], start_row=0)
+        build_fields(fields or [], start_row=0, parent="static")
 
-    # Submit Button (bottom row)
-    tk.Button(root, text="Submit", command=submit)\
-        .grid(row=99, column=0, columnspan=3, pady=20)
-
+    tk.Button(root, text="Submit", command=submit).grid(row=99, column=0, columnspan=3, pady=20)
     root.mainloop()
     return result
+-------------------------------------------------
 fields = [
     {"label": "Username", "type": "text", "required": True},
     {"label": "Upload Report", "type": "file"},
