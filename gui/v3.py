@@ -29,13 +29,19 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
         keys_to_remove = [k for k in entries if '__dynamic__' in k]
         for k in keys_to_remove:
             del entries[k]
-        for k in list(required_fields):
-            if '__dynamic__' in k:
-                del required_fields[k]
+        keys_to_remove = [k for k in required_fields if '__dynamic__' in k]
+        for k in keys_to_remove:
+            del required_fields[k]
 
     def add_enter_navigation(widgets):
         for i, widget in enumerate(widgets):
-            widget.bind("<Return>", lambda e, w=widgets[i+1] if i+1 < len(widgets) else submit_btn: w.focus_set())
+            try:
+                if i + 1 < len(widgets):
+                    widget.bind("<Return>", lambda e, w=widgets[i + 1]: w.focus_set())
+                else:
+                    widget.bind("<Return>", lambda e: submit_btn.submit())
+            except tk.TclError:
+                pass
 
     def render_file_input(row, label_text, required=False, key_prefix="static"):
         label = tk.Label(root, text=label_text, fg="red" if required else "black", anchor="w")
@@ -65,7 +71,7 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
             fg_color = "red" if required else "black"
             ftype = field.get("type", "text")
 
-            full_key = f"{key_prefix}__{label}"
+            full_key = f"{key_prefix}__{label_text}"
 
             if ftype == "file":
                 render_file_input(row, label_text, required, key_prefix)
@@ -79,13 +85,17 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
                     entry.grid(row=row, column=1, columnspan=2, padx=5, pady=5, sticky="w")
                     entries[full_key] = entry
                     nav_widgets.append(entry)
+                    if required:
+                        required_fields[full_key] = entry
 
                 elif ftype == "dropdown":
                     var = tk.StringVar()
-                    combo = ttk.Combobox(root, textvariable=var, values=field.get("options", []), width=82, state="readonly")
+                    combo = ttk.Combobox(root, textvariable=var, values=field.get("options", []), width=83, state="readonly")
                     combo.grid(row=row, column=1, columnspan=2, padx=5, pady=5, sticky="w")
                     entries[full_key] = combo
                     nav_widgets.append(combo)
+                    if required:
+                        required_fields[full_key] = combo
 
                 elif ftype == "radio":
                     var = tk.StringVar()
@@ -95,9 +105,8 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
                         tk.Radiobutton(frame, text=opt, variable=var, value=opt).pack(side="left", padx=0)
                     var.set(field.get("options", [])[0] if field.get("options") else "")
                     entries[full_key] = var
-
-                if required:
-                    required_fields[full_key] = entries[full_key]
+                    if required:
+                        required_fields[full_key] = var
 
                 if key_prefix == "dynamic":
                     dynamic_widgets.extend([lbl, entries[full_key]])
@@ -109,6 +118,10 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
         clear_dynamic_fields()
         fields_to_add = dynamic_field_map.get(selected, [])
         build_fields(fields_to_add, start_row=row_counter[0], key_prefix="dynamic")
+        nav_widgets.clear()
+        for k, w in entries.items():
+            if isinstance(w, (tk.Entry, ttk.Combobox)):
+                nav_widgets.append(w)
         add_enter_navigation(nav_widgets)
 
     def submit():
@@ -134,20 +147,23 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
                 result[label] = widget.get()
             elif isinstance(widget, tk.StringVar):
                 result[label] = widget.get()
+
         root.destroy()
 
     # --- BUILD FORM ---
     if controller_field:
-        tk.Label(root, text=controller_field["label"] + (" *" if controller_field.get("required") else ""), fg="red").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        tk.Label(root, text=controller_field["label"] + (" *" if controller_field.get("required") else ""), fg="red", anchor="w")\
+            .grid(row=0, column=0, padx=5, pady=5, sticky="w")
         controller_var = tk.StringVar()
         dropdown = ttk.Combobox(root, textvariable=controller_var, values=controller_field["options"], width=83, state="readonly")
         dropdown.grid(row=0, column=1, columnspan=2, padx=5, pady=5, sticky="w")
         dropdown.bind("<<ComboboxSelected>>", on_controller_change)
         row_counter[0] = 1
         if controller_field.get("required"):
-            required_fields[f"static__{controller_field['label']}"] = dropdown
-        entries[f"static__{controller_field['label']}"] = dropdown
+            required_fields["static__" + controller_field["label"]] = dropdown
+        entries["static__" + controller_field["label"]] = dropdown
         nav_widgets.append(dropdown)
+
     elif fields:
         build_fields(fields, key_prefix="static")
 
@@ -156,33 +172,3 @@ def get_user_inputs(fields=None, controller_field=None, dynamic_field_map=None):
     add_enter_navigation(nav_widgets)
     root.mainloop()
     return result
-
-
-fields = [
-    {"label": "Username", "type": "text", "required": True},
-    {"label": "Upload Report", "type": "file", "required": True},
-    {"label": "Format", "type": "radio", "options": ["PDF", "Excel"], "required": True},
-    {"label": "Department", "type": "dropdown", "options": ["IT", "HR"], "required": True}
-]
-#inputs = get_user_inputs(fields=fields)
-#print(inputs)
-#exit()
-
-controller_field = {
-    "label": "Input Type",
-    "type": "dropdown",
-    "options": ["Simple", "Advanced"],
-    "required": True
-}
-
-dynamic_field_map = {
-    "Simple": [{"label": "File A", "type": "file", "required": True}],
-    "Advanced": [
-        {"label": "File A", "type": "file", "required": True},
-        {"label": "Comment", "type": "text", "required": True}
-    ]
-}
-
-inputs = get_user_inputs(controller_field=controller_field, dynamic_field_map=dynamic_field_map)
-print(inputs)
-
