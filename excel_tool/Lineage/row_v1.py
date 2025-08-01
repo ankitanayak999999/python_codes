@@ -44,28 +44,34 @@ def generate_lineage_output(input_path):
 
     df['Source Full Name'] = df['Source DB Name'] + '.' + df['Source Schema Name'] + '.' + df['SourceTableName']
     df['Target Full Name'] = df['Target DB Name'] + '.' + df['Target Schema Name'] + '.' + df['Target Table Name']
-    df['Final Target'] = df['Target Full Name']
 
     G = nx.DiGraph()
     for _, row in df.iterrows():
         G.add_edge(row['Source Full Name'], row['Target Full Name'])
 
+    # Build lineage DF from paths
     lineage_df = extract_lineage_paths_with_levels(G).drop_duplicates()
 
-    merged_df = pd.merge(df, lineage_df, on=['Source Full Name', 'Target Full Name'], how='left')
+    # Add Leaf Flag
+    lineage_df['Is Leaf Node'] = lineage_df['Target Full Name'].apply(lambda x: G.out_degree(x) == 0)
 
-    merged_df['Is Leaf Node'] = merged_df['Target Full Name'].apply(lambda x: G.out_degree(x) == 0)
+    # Compute Ultimate Roots (list form)
+    lineage_df['Ultimate Root Source'] = lineage_df['Final Target'].apply(lambda x: trace_upstream_true_roots(x, G))
 
-    merged_df['Ultimate Root Source'] = merged_df['Final Target'].apply(lambda x: trace_upstream_true_roots(x, G))
-    exploded_df = merged_df.explode('Ultimate Root Source')
+    # Explode multiple ultimate roots
+    exploded_df = lineage_df.explode('Ultimate Root Source')
 
-    final_df = exploded_df[[
+    # Merge with original metadata
+    merged_df = pd.merge(exploded_df, df, on=['Source Full Name', 'Target Full Name'], how='left')
+
+    final_df = merged_df[[
         'Source Full Name', 'Target Full Name', 'Ultimate Root Source', 'Final Target',
         'Lineage Path', 'Hop Count', 'Node Level', 'Is Leaf Node',
         'Source DB Name', 'Source Schema Name', 'SourceTableName',
         'Target DB Name', 'Target Schema Name', 'Target Table Name'
     ]]
 
+    # Save
     input_filename = os.path.splitext(os.path.basename(input_path))[0]
     output_dir = os.path.dirname(input_path)
     output_path = os.path.join(output_dir, f"Result_Exploded_{input_filename}.xlsx")
