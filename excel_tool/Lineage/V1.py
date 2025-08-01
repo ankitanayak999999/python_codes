@@ -1,73 +1,115 @@
 import pandas as pd
 import networkx as nx
+import os
+import sys
+import tkinter as tk
+from tkinter import filedialog
 
-# Step 1: Read your Excel file (update file path as needed)
-input_path = "your_input_file.xlsx"  # Replace this with your actual file path
-df = pd.read_excel(input_path)
+def trace_upstream_true_roots_list(node, graph):
+    roots = set()
+    stack = [node]
+    visited = set()
+    while stack:
+        current = stack.pop()
+        visited.add(current)
+        preds = list(graph.predecessors(current))
+        if not preds:
+            roots.add(current)
+        else:
+            for pred in preds:
+                if pred not in visited:
+                    stack.append(pred)
+    return sorted(roots) if roots else []
 
-# Step 2: Create Source and Target Full Names
-df['Source Full Name'] = df['Source DB Name'] + '.' + df['Source Schema Name'] + '.' + df['SourceTableName']
-df['Target Full Name'] = df['Target DB Name'] + '.' + df['Target Schema Name'] + '.' + df['Target Table Name']
+def extract_lineage_summary(graph, df):
+    lineage_data = []
 
-# Step 3: Build lineage graph
-G = nx.DiGraph()
-for _, row in df.iterrows():
-    G.add_edge(row['Source Full Name'], row['Target Full Name'])
+    for _, row in df.iterrows():
+        src = row['Source Full Name']
+        tgt = row['Target Full Name']
 
-# Step 4: Reverse graph to trace ultimate root sources
-G_reverse = G.reverse()
+        # Trace full path to leaf
+        paths = list(nx.all_simple_paths(graph, src, tgt)) if tgt in nx.descendants(graph, src) else []
 
-def find_root_source(node):
-    while True:
-        predecessors = list(G_reverse.predecessors(node))
-        if not predecessors:
-            return node
-        node = predecessors[0]
+        if not paths:
+            # Just source → target
+            lineage_path = f"{src.split('.')[-1]} → {tgt.split('.')[-1]}"
+            hop_count = 1
+            node_level = "Node 1-2"
+            final_target = tgt
+        else:
+            # Take first path
+            path = paths[0]
+            lineage_path = ' → '.join([p.split('.')[-1] for p in path])
+            hop_count = len(path) - 1
+            node_level = f"Node 1-{hop_count + 1}"
+            final_target = path[-1]
 
-# Step 5: Get all paths from each source
-def find_paths(graph, source):
-    paths = []
-    for node in nx.descendants(graph, source):
-        if graph.out_degree(node) == 0:  # leaf node
-            for path in nx.all_simple_paths(graph, source=source, target=node):
-                paths.append(path)
-    return paths
+        # Compute leaf and root(s)
+        is_leaf = graph.out_degree(tgt) == 0
+        root_sources = trace_upstream_true_roots_list(final_target, graph)
+        ultimate_root = ', '.join(root_sources)
 
-# Step 6: Build lineage path table
-all_paths = []
-for source in df['Source Full Name'].unique():
-    paths = find_paths(G, source)
-    if not paths:
-        for target in df[df['Source Full Name'] == source]['Target Full Name'].unique():
-            all_paths.append({
-                'Source Full Name': source,
-                'Target Full Name': target,
-                'Final Target': target,
-                'Lineage Path': f"{source.split('.')[-1]} → {target.split('.')[-1]}",
-                'Hop Count': 1
-            })
-    else:
-        for path in paths:
-            all_paths.append({
-                'Source Full Name': path[0],
-                'Target Full Name': path[1] if len(path) > 1 else path[0],
-                'Final Target': path[-1],
-                'Lineage Path': ' → '.join([p.split('.')[-1] for p in path]),
-                'Hop Count': len(path) - 1
-            })
+        lineage_data.append({
+            'Source Full Name': src,
+            'Target Full Name': tgt,
+            'Final Target': final_target,
+            'Lineage Path': lineage_path,
+            'Hop Count': hop_count,
+            'Node Level': node_level,
+            'Is Leaf Node': is_leaf,
+            'Ultimate Root Source': ultimate_root
+        })
 
-lineage_df = pd.DataFrame(all_paths).drop_duplicates()
+    return pd.DataFrame(lineage_data)
 
-# Step 7: Merge lineage with original data
-final_df = pd.merge(df, lineage_df, on=['Source Full Name', 'Target Full Name'], how='left')
+def generate_lineage_output(input_path):
+    df = pd.read_excel(input_path)
 
-# Step 8: Add true ultimate root and leaf node flag
-final_df['Ultimate Root Source'] = final_df['Source Full Name'].apply(find_root_source)
-final_df['Is Leaf Node'] = final_df['Target Full Name'].apply(lambda x: G.out_degree(x) == 0)
+    # Build full names
+    df['Source Full Name'] = df['Source DB Name'] + '.' + df['Source Schema Name'] + '.' + df['SourceTableName']
+    df['Target Full Name'] = df['Target DB Name'] + '.' + df['Target Schema Name'] + '.' + df['Target Table Name']
 
-# Step 9: Save to Excel
-output_path = "lineage_output_final.xlsx"
-final_df.to_excel(output_path, index=False)
+    # Build graph
+    G = nx.DiGraph()
+    for _, row in df.iterrows():
+        G.add_edge(row['Source Full Name'], row['Target Full Name'])
 
-# Optional: Preview
-print(final_df[['Source Full Name', 'Target Full Name', 'Ultimate Root Source', 'Final Target', 'Lineage Path', 'Is Leaf Node']])
+    # Compute lineage summary (1 row per original row)
+    lineage_summary = extract_lineage_summary(G, df)
+
+    # Merge back to original
+    merged_df = pd.concat([df, lineage_summary.drop(columns=['Source Full Name', 'Target Full Name'])], axis=1)
+    merged_df['Full Source Table Name'] = df['Source Full Name']
+    merged_df['Full Target Table Name'] = df['Target Full Name']
+
+    # Final column ordering
+    final_columns = [
+        'Full Source Table Name', 'Full Target Table Name',
+        'Ultimate Root Source', 'Source Full Name', 'Final Target',
+        'Lineage Path', 'Hop Count', 'Node Level', 'Is Leaf Node',
+        'Source DB Name', 'Source Schema Name', 'SourceTableName',
+        'Target DB Name', 'Target Schema Name', 'Target Table Name'
+    ]
+    final_df = merged_df[final_columns]
+
+    # Save
+    input_filename = os.path.splitext(os.path.basename(input_path))[0]
+    output_dir = os.path.dirname(input_path)
+    output_path = os.path.join(output_dir, f"Result_Grouped_{input_filename}.xlsx")
+    final_df.to_excel(output_path, index=False)
+    print(f"\n✅ Grouped-root lineage result saved to: {output_path}")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.withdraw()
+    input_file = filedialog.askopenfilename(
+        title="Select your Excel Lineage File",
+        filetypes=[("Excel Files", "*.xlsx *.xls")]
+    )
+
+    if not input_file:
+        print("❌ No file selected. Exiting.")
+        sys.exit(1)
+
+    generate_lineage_output(input_file)
