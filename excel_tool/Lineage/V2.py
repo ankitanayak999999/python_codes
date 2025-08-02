@@ -1,80 +1,68 @@
-import os
 import pandas as pd
-import networkx as nx
-from tkinter import Tk, filedialog
+import os
+from collections import defaultdict
 
 def generate_lineage_output(input_path):
     df = pd.read_excel(input_path)
 
-    # Add full names
-    df['Source Full Name'] = df['Source DB Name'].astype(str) + '.' + df['Source Schema Name'].astype(str) + '.' + df['SourceTableName'].astype(str)
-    df['Target Full Name'] = df['Target DB Name'].astype(str) + '.' + df['Target Schema Name'].astype(str) + '.' + df['Target Table Name'].astype(str)
+    # Create source/target full names
+    df["Source Full Name"] = df["Source DB Name"] + "." + df["Source Schema Name"] + "." + df["SourceTableName"]
+    df["Target Full Name"] = df["Target DB Name"] + "." + df["Target Schema Name"] + "." + df["Target Table Name"]
 
-    # Build the graph
-    G = nx.DiGraph()
+    # Build lineage graph
+    forward_map = defaultdict(list)
     for _, row in df.iterrows():
-        G.add_edge(row['Source Full Name'], row['Target Full Name'])
+        forward_map[row["Source Full Name"]].append(row["Target Full Name"])
 
-    # Identify root (ultimate source) and leaf (final target) nodes
-    sources = set(df['Source Full Name'])
-    targets = set(df['Target Full Name'])
-    root_nodes = sources - targets
-    leaf_nodes = targets - sources
+    all_sources = set(df["Source Full Name"])
+    all_targets = set(df["Target Full Name"])
+    root_sources = all_sources - all_targets
 
-    # Build lineage paths
-    all_paths = []
-    for root in root_nodes:
-        for target in targets:
-            if root != target and nx.has_path(G, root, target):
-                for path in nx.all_simple_paths(G, source=root, target=target):
-                    for i in range(len(path) - 1):
-                        src = path[i]
-                        tgt = path[i + 1]
-                        lineage_path = ' >> '.join(path)
-                        hop_count = len(path) - 1
-                        node_level = f"{i+1}-{i+2}"
-                        is_leaf = tgt not in sources
-                        # Get original row for metadata
-                        match = df[(df['Source Full Name'] == src) & (df['Target Full Name'] == tgt)]
-                        if not match.empty:
-                            base = match.iloc[0].to_dict()
-                            base.update({
-                                'Source Full Name': src,
-                                'Target Full Name': tgt,
-                                'Ultimate Root Source': root,
-                                'Final Target': target,
-                                'Lineage Path': lineage_path,
-                                'Hop Count': hop_count,
-                                'Node Level': node_level,
-                                'Is Leaf Node': is_leaf
-                            })
-                            all_paths.append(base)
+    paths = []
 
-    # Final dataframe
-    final_df = pd.DataFrame(all_paths)
+    def dfs(path):
+        current = path[-1]
+        if current not in forward_map:
+            paths.append(path)
+            return
+        for nxt in forward_map[current]:
+            if nxt not in path:
+                dfs(path + [nxt])
 
-    # Column order
-    final_columns = [
-        'Source Full Name', 'Target Full Name', 'Ultimate Root Source', 'Final Target',
-        'Lineage Path', 'Hop Count', 'Node Level', 'Is Leaf Node',
-        'Source DB Name', 'Source Schema Name', 'SourceTableName',
-        'Target DB Name', 'Target Schema Name', 'Target Table Name'
+    for root in root_sources:
+        dfs([root])
+
+    lineage_rows = []
+    for path in paths:
+        for i in range(len(path) - 1):
+            lineage_rows.append({
+                "Ultimate Root Source": path[0],
+                "Final Target": path[-1],
+                "Lineage Path": ">>".join(path[:i+2]),
+                "Hop Count": len(path) - 1,
+                "Node Level": f"{i+1}-{i+2}",
+                "Is Leaf Node": "TRUE" if i == len(path) - 2 else "FALSE",
+                "Source Full Name": path[i],
+                "Target Full Name": path[i+1],
+            })
+
+    lineage_df = pd.DataFrame(lineage_rows)
+
+    # Merge to get original metadata
+    merged = pd.merge(lineage_df, df, how="left", on=["Source Full Name", "Target Full Name"])
+
+    final_cols = [
+        "Source Full Name", "Target Full Name",
+        "Ultimate Root Source", "Final Target",
+        "Lineage Path", "Hop Count", "Node Level", "Is Leaf Node",
+        "Source DB Name", "Source Schema Name", "SourceTableName",
+        "Target DB Name", "Target Schema Name", "Target Table Name"
     ]
-    final_df = final_df[final_columns]
+    final_df = merged[final_cols]
 
-    # Save result
-    input_file_name = os.path.splitext(os.path.basename(input_path))[0]
-    output_path = f"Result_{input_file_name}.xlsx"
-    final_df.to_excel(output_path, index=False)
-    print(f"✅ Lineage output saved as: {output_path}")
+    output_file = f"Result_{os.path.splitext(os.path.basename(input_path))[0]}.xlsx"
+    final_df.to_excel(output_file, index=False)
+    print(f"\n✅ Saved: {output_file}")
 
-if __name__ == "__main__":
-    Tk().withdraw()
-    input_file = filedialog.askopenfilename(
-        title="Select your lineage Excel file",
-        filetypes=[("Excel files", "*.xlsx *.xls")]
-    )
-    if input_file:
-        generate_lineage_output(input_file)
-    else:
-        print("❌ No input file selected.")
+# Example usage (remove if using GUI)
+# generate_lineage_output("your_file.xlsx")
