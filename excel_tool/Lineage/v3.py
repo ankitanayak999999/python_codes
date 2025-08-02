@@ -1,14 +1,14 @@
 import pandas as pd
 import networkx as nx
 import os
-from tkinter import filedialog, Tk
 from datetime import datetime
+from tkinter import Tk, filedialog
 
 def browse_file():
     root = Tk()
     root.withdraw()
     file_path = filedialog.askopenfilename(
-        title="Select Input Excel File", 
+        title="Select Excel File",
         filetypes=[("Excel files", "*.xlsx")]
     )
     return file_path
@@ -72,23 +72,43 @@ def expand_paths_to_rows(paths, df):
                     'Is Leaf Node': is_leaf_node
                 })
                 rows.append(base)
-    return pd.DataFrame(rows)
 
-def save_output(df, suffix="lineage_output"):
+    df_expanded = pd.DataFrame(rows)
+
+    group_keys = [
+        'Ultimate Root Source', 'Source DB Name', 'Source Schema Name', 'SourceTableName',
+        'Target DB Name', 'Target Schema Name', 'Target Table Name', 'Node Level'
+    ]
+    agg_columns = {
+        'Final Target': lambda x: ','.join(sorted(set(x))),
+        'Lineage Path': 'first',
+        'Hop Count': 'first',
+        'Is Leaf Node': 'first'
+    }
+
+    for col in df.columns:
+        if col not in group_keys and col not in agg_columns:
+            agg_columns[col] = 'first'
+
+    df_grouped = df_expanded.groupby(group_keys, dropna=False).agg(agg_columns).reset_index()
+    return df_grouped
+
+def save_output(df, input_file_path, suffix="lineage_output"):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(os.getcwd(), "lineage_results")
     os.makedirs(output_dir, exist_ok=True)
-    file_path = os.path.join(output_dir, f"{suffix}_{timestamp}.xlsx")
+    input_name = os.path.splitext(os.path.basename(input_file_path))[0]
+    file_path = os.path.join(output_dir, f"Result_{input_name}_{timestamp}.xlsx")
     df.to_excel(file_path, index=False)
     return file_path
 
-def run_lineage_workflow():
-    input_file = browse_file()
-    if not input_file:
+def run_lineage_gui():
+    input_file_path = browse_file()
+    if not input_file_path:
         print("❌ No file selected.")
         return
 
-    df = pd.read_excel(input_file)
+    df = pd.read_excel(input_file_path)
 
     required_cols = [
         'Source DB Name', 'Source Schema Name', 'SourceTableName',
@@ -102,8 +122,9 @@ def run_lineage_workflow():
     G = build_graph(df)
     paths = generate_lineage_paths(G)
     output_df = expand_paths_to_rows(paths, df)
-    output_file = save_output(output_df)
+    output_file = save_output(output_df, input_file_path)
     print(f"\n✅ Lineage file saved to:\n{output_file}")
 
-# Run it
-run_lineage_workflow()
+# 🚀 Run it with GUI
+if __name__ == "__main__":
+    run_lineage_gui()
