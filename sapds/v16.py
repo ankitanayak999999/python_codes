@@ -7,7 +7,6 @@ from collections import defaultdict, namedtuple
 import pandas as pd
 
 # ------------------------ tiny utilities ------------------------
-
 def strip_ns(tag): return re.sub(r"^\{.*\}", "", tag) if isinstance(tag, str) else ""
 def lower(s): return (s or "").strip().lower()
 def attrs_ci(e): return {k.lower(): (v or "") for k, v in getattr(e, "attrib", {}).items()}
@@ -37,24 +36,12 @@ def dedupe(seq):
             seen.add(x); out.append(x)
     return out
 
-def canon(s:str)->str: return re.sub(r'[^A-Z0-9]','',(s or '').upper())
-
-# ------------------------ display normalization ------------------------
-
 def _strip_wrappers(s: str) -> str:
     if s is None: return ""
     s = str(s).strip().strip('"').strip("'")
-    # remove wrapping [] or {}
     if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
         s = s[1:-1]
     return s
-
-def _norm_key(s: str) -> str:
-    s = _strip_wrappers(s)
-    s = re.sub(r"[\{\}\[\]]", "", s)
-    s = re.sub(r"\s+", " ", s).replace(" ", "_")
-    s = re.sub(r"_+", "_", s)
-    return s.upper()
 
 def _pretty(s: str) -> str:
     s = _strip_wrappers(s)
@@ -62,28 +49,14 @@ def _pretty(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-class NameBag:
-    def __init__(self): self.best = None
-    def _score(self, s):
-        if not s: return (-1, -1, -1)
-        has_space = 1 if " " in s else 0
-        clean     = 1 if (s == _pretty(s)) else 0
-        return (has_space, clean, len(s))
-    def add(self, s):
-        s = _pretty(s)
-        if not s: return
-        if self.best is None or self._score(s) > self._score(self.best):
-            self.best = s
-    def get(self, fallback=""): return self.best or _pretty(fallback)
+def _norm_key(s: str) -> str:
+    return re.sub(r'[^A-Z0-9]', '', _pretty(s).upper())
 
-# ------------------------ constants & detectors ------------------------
+# ------------------------ patterns & detectors ------------------------
+NAME_CHARS = r"[A-Za-z0-9_\.\-\$#@\[\]% ]+"
+DOTS = re.compile(r"\s*\.\s*")
 
-DF_TAGS       = ("didataflow","dataflow","dflow")
-JOB_TAGS      = ("dijob","dibatchjob","job","batch_job")
-PROJECT_TAGS  = ("diproject","project")
-WF_TAGS       = ("diworkflow","workflow")
-CALLSTEP_TAGS = ("dicallstep","callstep")
-
+# cache/policy tokens to ignore in triples
 CACHE_WORDS  = {"PRE_LOAD_CACHE","POST_LOAD_CACHE","CACHE","PRE_LOAD","POST_LOAD"}
 POLICY_WORDS = {"MAX","MIN","MAX-NS","MIN-NS","MAX_NS","MIN_NS"}
 
@@ -97,201 +70,124 @@ def _looks_like_table(token: str) -> bool:
     if t.isdigit(): return False
     return bool(re.search(r"[A-Za-z]", t)) and len(t) >= 3
 
-def _valid_triplet(ds: str, sch: str, tbl: str) -> bool:
-    return bool(ds) and _looks_like_table(tbl) and not _is_cache_or_policy(sch)
+def _valid(ds, sch, tbl): return bool(ds) and _looks_like_table(tbl) and not _is_cache_or_policy(sch)
 
-NAME_CHARS    = r"[A-Za-z0-9_\.\-\$#@\[\]% ]+"
-DOT_NORMALIZE = re.compile(r"\s*\.\s*")
-
-# classification (lookup_ext FIRST; lookup excludes lookup_ext via (?!_))
-HAS_LOOKUP_EXT = re.compile(r'\blookup_ext\s*\(', re.I)
+# lookup/lookup_ext detection & extraction (attributes + dotted + arg triples)
 HAS_LOOKUP     = re.compile(r'\blookup(?!_)\s*\(', re.I)
+HAS_LOOKUP_EXT = re.compile(r'\blookup[_ ]?ext\s*\(', re.I)
 
-# lookup dotted/braced/args
-LOOKUP_CALL_RE     = re.compile(rf'\blookup(?!_)\s*\(\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})', re.I)
-BRACED_TRIPLE      = re.compile(r'\blookup(?!_)\s*\(\s*\{\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^\}]+?)\s*\}', re.I|re.S)
-LOOKUP_ARGS_RE     = re.compile(r'\blookup(?!_)\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,\)]+?)\s*(?:,|\))', re.I|re.S)
+LOOKUP_ARGS     = re.compile(r'\blookup(?!_)\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,\)]+)', re.I|re.S)
+LOOKUP_DOTTED   = re.compile(rf'\blookup(?!_)\s*\(\s*"?({NAME_CHARS})"?\s*\.\s*"?({NAME_CHARS})"?\s*\.\s*"?({NAME_CHARS})"?', re.I)
 
-# lookup_ext dotted/braced/args + FUNCTION_CALL named KV (most accurate)
-LOOKUP_EXT_CALL_RE = re.compile(rf'\blookup_ext\s*\(\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})', re.I)
-BRACED_TRIPLE_EXT  = re.compile(r'\blookup[_\s]*ext\s*\(\s*\{\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^\}]+?)\s*\}', re.I|re.S)
-LOOKUP_EXT_ARGS_RE = re.compile(r'\blookup_ext\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,\)]+?)\s*(?:,|\))', re.I|re.S)
-LOOKUP_EXT_NAMED_KV_RE = re.compile(
-    r'\blookup_ext\s*\([^)]*?'
-    r'(?:tableDatastore|tabledatastore)\s*=\s*([\'"]?)(?P<ds>[^\'",)\s]+)\1[^)]*?'
-    r'(?:tableOwner|tableowner)\s*=\s*([\'"]?)(?P<own>[^\'",)\s]+)\3[^)]*?'
-    r'(?:tableName|tablename)\s*=\s*([\'"]?)(?P<tbl>[^\'",)\s]+)\5',
-    re.I | re.S
+LOOKUP_EXT_ARGS   = re.compile(r'\blookup[_ ]?ext\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,\)]+)', re.I|re.S)
+LOOKUP_EXT_DOTTED = re.compile(rf'\blookup[_ ]?ext\s*\(\s*"?({NAME_CHARS})"?\s*\.\s*"?({NAME_CHARS})"?\s*\.\s*"?({NAME_CHARS})"?', re.I)
+LOOKUP_EXT_KV     = re.compile(
+    r'\blookup[_ ]?ext\s*\([^)]*?'
+    r'(?:tableDatastore|tabledatastore|tabledatastorename|datastorename)\s*=\s*([\'"]?)(?P<ds>[^\'",)\s]+)\1[^)]*?'
+    r'(?:tableOwner|tableowner|ownername)\s*=\s*([\'"]?)(?P<own>[^\'",)\s]+)\3[^)]*?'
+    r'(?:tableName|tablename|name)\s*=\s*([\'"]?)(?P<tbl>[^\'",)\s]+)\5',
+    re.I|re.S
 )
 
-def extract_lookup_from_call(text: str, is_ext: bool = False):
-    """Return (datastore, owner/schema, table) or ('','','')."""
+def extract_lookup_triple(text: str, is_ext: bool):
     if not text: return ("","","")
-    t = DOT_NORMALIZE.sub(".", text)
+    t = DOTS.sub(".", text)
 
-    # 1) FUNCTION_CALL named kv (ext only)
     if is_ext:
-        mkv = LOOKUP_EXT_NAMED_KV_RE.search(t)
-        if mkv and _valid_triplet(mkv.group("ds"), mkv.group("own"), mkv.group("tbl")):
+        mkv = LOOKUP_EXT_KV.search(t)
+        if mkv and _valid(mkv.group("ds"), mkv.group("own"), mkv.group("tbl")):
             return mkv.group("ds").strip(), mkv.group("own").strip(), mkv.group("tbl").strip()
 
-    # 2) braced {...}
-    m0 = (BRACED_TRIPLE_EXT if is_ext else BRACED_TRIPLE).search(t)
-    if m0 and _valid_triplet(m0.group(1), m0.group(2), m0.group(3)):
-        return m0.group(1).strip(), m0.group(2).strip(), m0.group(3).strip()
+    m = (LOOKUP_EXT_DOTTED if is_ext else LOOKUP_DOTTED).search(t)
+    if m and _valid(m.group(1), m.group(2), m.group(3)):
+        return m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
 
-    # 3) dotted ds.owner.table
-    m1 = (LOOKUP_EXT_CALL_RE if is_ext else LOOKUP_CALL_RE).search(t)
-    if m1 and _valid_triplet(m1.group(1), m1.group(2), m1.group(3)):
-        return m1.group(1).strip(), m1.group(2).strip(), m1.group(3).strip()
-
-    # 4) simple args triple
-    m2 = (LOOKUP_EXT_ARGS_RE if is_ext else LOOKUP_ARGS_RE).search(t)
-    if m2 and _valid_triplet(m2.group(1), m2.group(2), m2.group(3)):
-        return m2.group(1).strip(), m2.group(2).strip(), m2.group(3).strip()
+    m = (LOOKUP_EXT_ARGS if is_ext else LOOKUP_ARGS).search(t)
+    if m and _valid(m.group(1), m.group(2), m.group(3)):
+        return m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
 
     return ("","","")
 
-# ------------------------ names (project / job / df) ------------------------
+# ------------------------ high-level tags ------------------------
+DF_TAGS       = ("didataflow","dataflow","dflow")
+JOB_TAGS      = ("dijob","dibatchjob","job","batch_job")
+PROJECT_TAGS  = ("diproject","project")
+WF_TAGS       = ("diworkflow","workflow")
 
-def _job_name_from_node(job_node):
-    # prefer DIAttribute name="job_name"
+# ------------------------ context helpers ------------------------
+def job_name_from_node(job_node):
     for ch in job_node.iter():
         if lower(strip_ns(getattr(ch,"tag",""))) == "diattribute" and lower(ch.attrib.get("name",""))=="job_name":
             v = (ch.attrib.get("value") or "").strip()
             if v: return v
-    # fallback to node attribute
     return (job_node.attrib.get("name") or job_node.attrib.get("displayName") or "").strip()
 
-def collect_df_names(root):
-    out=set()
-    for n in root.iter():
-        if lower(strip_ns(getattr(n,"tag",""))) in DF_TAGS:
-            nm = (n.attrib.get("name") or n.attrib.get("displayName") or "").strip()
-            if nm: out.add(nm)
-    return out
-
-def build_df_project_map(root):
-    df_names = collect_df_names(root)
+def map_df_to_project(root):
+    out={}
     projects=[]
     for p in root.iter():
         if lower(strip_ns(getattr(p,"tag",""))) in PROJECT_TAGS:
-            nm = (p.attrib.get("name") or p.attrib.get("displayName") or "").strip()
+            nm=(p.attrib.get("name") or p.attrib.get("displayName") or "").strip()
             if nm: projects.append((nm,p))
-    df_proj={}
-    for nm, p in projects:
-        for d in p.iter():
+    for proj_name, pnode in projects:
+        for d in pnode.iter():
             if lower(strip_ns(getattr(d,"tag",""))) in DF_TAGS:
                 dn=(d.attrib.get("name") or d.attrib.get("displayName") or "").strip()
-                if dn: df_proj.setdefault(dn, nm)
+                if dn: out.setdefault(dn, proj_name)
     if len(projects)==1:
         only=projects[0][0]
-        for dn in df_names: df_proj.setdefault(dn, only)
-    return df_proj
+        for d in root.iter():
+            if lower(strip_ns(getattr(d,"tag",""))) in DF_TAGS:
+                dn=(d.attrib.get("name") or d.attrib.get("displayName") or "").strip()
+                if dn: out.setdefault(dn, only)
+    return out
 
-def build_df_job_map(root):
-    df_names = collect_df_names(root); df_canon={canon(n):n for n in df_names}
-    jobs={}; wfs={}
-    for n in root.iter():
-        t=lower(strip_ns(getattr(n,"tag","")))
-        if t in JOB_TAGS:
-            nm=_job_name_from_node(n)
-            if nm: jobs[nm]=n
-        elif t in WF_TAGS:
-            nm=(n.attrib.get("name") or n.attrib.get("displayName") or "").strip()
-            if nm: wfs[nm]=n
-
+def map_df_to_job(root):
+    # simple heuristic: nearest ancestor job/workflow that references the DF
     pm=build_parent_map(root)
-    edges=defaultdict(set)
-
-    def add_edge(src_kind, src_name, dst_kind, dst_name):
-        if src_name and dst_name: edges[(src_kind, canon(src_name))].add((dst_kind, canon(dst_name)))
-
-    for cs in root.iter():
-        if lower(strip_ns(getattr(cs,"tag",""))) not in CALLSTEP_TAGS: continue
-
-        # find source (job/workflow) up the tree
-        src_kind, src_name = None, None
-        cur=cs
-        for _ in range(200):
-            cur=pm.get(cur); 
-            if not cur: break
-            t=lower(strip_ns(cur.tag))
-            if t in JOB_TAGS: src_kind,src_name="job",_job_name_from_node(cur); break
-            if t in WF_TAGS:  src_kind,src_name="wf",(cur.attrib.get("name") or cur.attrib.get("displayName") or ""); break
-        if not src_name: continue
-
-        a=attrs_ci(cs); vals=list(a.values()); vals.append(collect_text(cs))
-        tgt_type=(a.get("calledobjecttype") or a.get("type") or "").strip().lower()
-        names=[]
-        for k in ("calledobject","name","object","target","called_object"):
-            if a.get(k):
-                raw=a.get(k); names.append(raw)
-                # add basename variants
-                if any(sep in raw for sep in ["/","\\",".",":"]):
-                    names.append(raw.split("/")[-1].split("\\")[-1].split(":")[-1].split(".")[-1])
-
-        txt=" ".join(vals)
-
-        if tgt_type in ("workflow","diworkflow"):
-            for nm in names: add_edge(src_kind,src_name,"wf",nm)
-        elif tgt_type in ("dataflow","didataflow"):
-            for nm in names: add_edge(src_kind,src_name,"df",nm)
-        else:
-            can=canon(txt)
-            for w in wfs.keys():
-                if canon(w) in can: add_edge(src_kind,src_name,"wf",w)
-            for d in df_names:
-                if canon(d) in can: add_edge(src_kind,src_name,"df",d)
-
-    df_job={}
-    for j in jobs.keys():
-        start=("job", canon(j)); seen={start}; stack=[start]; reach=set()
-        while stack:
-            node=stack.pop()
-            for nxt in edges.get(node,()):
-                if nxt in seen: continue
-                seen.add(nxt)
-                kind, nm = nxt
-                if kind=="df":
-                    real=df_canon.get(nm)
-                    if real: reach.add(real)
-                else:
-                    stack.append(nxt)
-        for d in reach: df_job.setdefault(d, j)
+    df_names=set()
+    for n in root.iter():
+        if lower(strip_ns(getattr(n,"tag",""))) in DF_TAGS:
+            nm=(n.attrib.get("name") or n.attrib.get("displayName") or "").strip()
+            if nm: df_names.add(nm)
+    jobs=[]
+    for n in root.iter():
+        if lower(strip_ns(getattr(n,"tag",""))) in JOB_TAGS:
+            jobs.append((job_name_from_node(n), n))
+    out={}
+    # direct containment
+    for df in root.iter():
+        if lower(strip_ns(getattr(df,"tag",""))) in DF_TAGS:
+            dn=(df.attrib.get("name") or df.attrib.get("displayName") or "").strip()
+            cur=pm.get(df)
+            while cur is not None:
+                t=lower(strip_ns(cur.tag))
+                if t in JOB_TAGS:
+                    out.setdefault(dn, job_name_from_node(cur)); break
+                cur=pm.get(cur)
     if len(jobs)==1:
-        only=list(jobs.keys())[0]
-        for d in df_names: df_job.setdefault(d, only)
-    return df_job
+        only=jobs[0][0]
+        for dn in df_names: out.setdefault(dn, only)
+    return out
 
-# ------------------------ schema/column helpers ------------------------
-
-def schema_out_from_DISchema(e, pm, fallback=""):
-    """Nearest DISchema; prefer non-'Join'."""
+def nearest_schema_out(elem, pm, fallback=""):
     best=None; join=None
-    for a in ancestors(e, pm, 200):
+    for a in ancestors(elem, pm, 200):
         if lower(strip_ns(getattr(a,"tag","")))=="dischema":
             nm=(attrs_ci(a).get("name") or "").strip()
-            if nm:
-                if lower(nm)!="join": best=nm; break
-                else: join=nm
+            if nm and lower(nm)!="join":
+                best=nm; break
+            elif nm: join=nm
     return best or join or fallback
 
-def find_output_column(e, pm):
-    if lower(strip_ns(getattr(e,"tag","")))=="dielement":
-        nm=(attrs_ci(e).get("name") or "").strip()
-        if nm: return nm
-    cur=e
-    for _ in range(200):
-        if cur is None: break
-        if lower(strip_ns(cur.tag))=="dielement":
-            nm=(attrs_ci(cur).get("name") or "").strip()
+def nearest_output_col(elem, pm):
+    for a in ancestors(elem, pm, 60):
+        if lower(strip_ns(getattr(a,"tag","")))=="dielement":
+            nm=(attrs_ci(a).get("name") or "").strip()
             if nm: return nm
-        cur=pm.get(cur)
     return ""
 
 # ------------------------ main parser ------------------------
-
 Record = namedtuple("Record", [
     "project_name","job_name","dataflow_name",
     "role","datastore","schema","table",
@@ -301,191 +197,168 @@ Record = namedtuple("Record", [
 def parse_single_xml(xml_path: str):
     tree=ET.parse(xml_path); root=tree.getroot()
     pm=build_parent_map(root)
-    df_job_map  = build_df_job_map(root)
-    df_proj_map = build_df_project_map(root)
 
-    # pretty name caches
-    display_ds  = defaultdict(NameBag)
-    display_sch = defaultdict(NameBag)
-    display_tbl = defaultdict(NameBag)
-
-    def remember_display(ds, sch, tbl):
-        ds = _strip_wrappers(ds).strip()
-        sch= _strip_wrappers(sch).strip()
-        tbl= _strip_wrappers(tbl).strip()
-        k=(_norm_key(ds),_norm_key(sch),_norm_key(tbl))
-        display_ds[k].add(ds); display_sch[k].add(sch); display_tbl[k].add(tbl)
+    df_proj = map_df_to_project(root)
+    df_job  = map_df_to_job(root)
 
     source_target=set()
-    lookup_pos    = defaultdict(list)  # schema>>column
-    lookup_ext_pos= defaultdict(set)   # schema only
-    seen_ext_keys = set()              # avoid dup when both FUNCTION_CALL and DIExpression exist
+    lookup_pos   = defaultdict(list)  # (proj,job,df,ds,sch,tbl) -> ["Schema>>Col", ...]
+    lookup_ext_s = defaultdict(set)   # (proj,job,df,ds,sch,tbl) -> {"SchemaA","SchemaB"...}
+    seen_ext_fun = set()              # keys captured via FUNCTION_CALL (to avoid dup from DIExpression)
 
-    cur_proj=cur_job=cur_df=cur_schema=""; last_job=""
+    cur_df=cur_proj=cur_job=cur_schema=""
 
-    def context_for(e):
-        proj=job=df=""
-        for a in ancestors(e, pm):
-            t=lower(strip_ns(a.tag)); at=attrs_ci(a)
+    def ctx(elem):
+        # project / job / df by nearest ancestors, then global maps
+        p=j=d=""
+        for a in ancestors(elem, pm, 200):
+            t=lower(strip_ns(getattr(a,"tag",""))); at=attrs_ci(a)
             nm=(at.get("name") or at.get("displayname") or "").strip()
-            if not df and t in DF_TAGS: df=nm or df
-            if not proj and t in PROJECT_TAGS: proj=nm or proj
-            if t in JOB_TAGS and not job: job=_job_name_from_node(a) or job
-        df=df or cur_df
-        proj=proj or df_proj_map.get(df, cur_proj)
-        job=job or df_job_map.get(df, cur_job or last_job)
-        return proj, job, df
+            if not d and t in DF_TAGS: d=nm
+            if not p and t in PROJECT_TAGS: p=nm
+            if t in JOB_TAGS and not j: j=job_name_from_node(a)
+        d=d or cur_df; p=p or df_proj.get(d,""); j=j or df_job.get(d,"")
+        return p, j, d
 
     for e in root.iter():
-        if not isinstance(e.tag, str): continue
+        if not isinstance(e.tag,str): continue
         tag=lower(strip_ns(e.tag)); a=attrs_ci(e)
 
+        # track current visibles
         if tag in PROJECT_TAGS: cur_proj=(a.get("name") or a.get("displayname") or cur_proj).strip()
         if tag in DF_TAGS:      cur_df  =(a.get("name") or a.get("displayname") or cur_df).strip()
-        if tag in JOB_TAGS:
-            cur_job=_job_name_from_node(e) or (a.get("name") or a.get("displayname") or cur_job).strip()
-            if cur_job: last_job=cur_job
+        if tag in JOB_TAGS:     cur_job = job_name_from_node(e) or cur_job
         if tag=="dischema":     cur_schema=(a.get("name") or a.get("displayname") or cur_schema).strip()
 
-        # sources / targets
+        # ---- sources / targets
         if tag in ("didatabasetablesource","didatabasetabletarget"):
             ds =(a.get("datastorename") or a.get("datastore") or "").strip()
             sch=(a.get("ownername") or a.get("schema") or a.get("owner") or "").strip()
             tbl=(a.get("tablename") or a.get("table") or "").strip()
             if ds and tbl:
-                remember_display(ds,sch,tbl)
-                proj,job,df=context_for(e)
+                p,j,d = ctx(e)
                 role="source" if "source" in tag else "target"
-                key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
-                source_target.add(key)
+                source_target.add((p,j,d,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), ds,sch,tbl))
 
-        # ------- lookup (column-level UI mapping) -------
-        if tag=="diattribute" and lower(a.get("name",""))=="ui_mapping_text":
-            txt=a.get("value") or e.text or ""
+        # ---- capture ALL FUNCTION_CALL lookup / lookup_ext
+        if tag=="function_call" and lower(a.get("name","")) in ("lookup","lookup_ext"):
+            is_ext = (lower(a.get("name"))=="lookup_ext")
+            p,j,d = ctx(e)
+            schema_out = nearest_schema_out(e, pm, cur_schema)
+
+            # accept multiple attribute variants
+            attr_text = " ".join([f'{k}="{v}"' for k,v in a.items()])
+            body_text = collect_text(e)
+            ds=sch=tbl=""
+
+            if is_ext:
+                # prefer named kv
+                m = LOOKUP_EXT_KV.search(attr_text) or LOOKUP_EXT_KV.search(body_text)
+                if m and _valid(m.group("ds"), m.group("own"), m.group("tbl")):
+                    ds, sch, tbl = m.group("ds"), m.group("own"), m.group("tbl")
+                if not ds:
+                    ds, sch, tbl = extract_lookup_triple(attr_text+" "+body_text, True)
+            else:
+                # lookup: parse args/dotted from attributes+body
+                ds, sch, tbl = extract_lookup_triple(attr_text+" "+body_text, False)
+
+            if ds and tbl and schema_out:
+                key = (p,j,d,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
+                if is_ext:
+                    lookup_ext_s[key].add(schema_out)
+                    seen_ext_fun.add(key)
+                else:
+                    col = nearest_output_col(e, pm)
+                    if col:
+                        lookup_pos[key].append(f"{schema_out}>>{col}")
+
+        # ---- fallback DIExpression / DIAttribute containing lookup text
+        if tag in ("diexpression","diattribute"):
+            txt = " ".join([f'{k}="{v}"' for k,v in a.items()]) + " " + collect_text(e)
+            if not (HAS_LOOKUP.search(txt) or HAS_LOOKUP_EXT.search(txt)): 
+                continue
+            p,j,d = ctx(e)
+            schema_out = nearest_schema_out(e, pm, cur_schema)
+            if not schema_out: 
+                continue
+
+            if HAS_LOOKUP_EXT.search(txt):
+                ds, sch, tbl = extract_lookup_triple(txt, True)
+                if ds and tbl:
+                    key=(p,j,d,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
+                    if key not in seen_ext_fun:   # only if FUNCTION_CALL didn’t already capture it
+                        lookup_ext_s[key].add(schema_out)
+
             if HAS_LOOKUP.search(txt):
-                proj,job,df=context_for(e)
-                schema_out=schema_out_from_DISchema(e, pm, cur_schema)
-                col=find_output_column(e, pm)
-                dsl,schl,tbl=extract_lookup_from_call(txt, is_ext=False)
-                if dsl and tbl and schema_out and col:
-                    remember_display(dsl,schl,tbl)
-                    lookup_pos[(proj,job,df,_norm_key(dsl),_norm_key(schl),_norm_key(tbl))]\
-                        .append(f"{schema_out}>>{col}")
+                ds, sch, tbl = extract_lookup_triple(txt, False)
+                if ds and tbl:
+                    col = nearest_output_col(e, pm)
+                    if col:
+                        key=(p,j,d,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
+                        lookup_pos[key].append(f"{schema_out}>>{col}")
 
-        # ------- lookup_ext (FUNCTION_CALL preferred) -------
-        if tag=="function_call" and lower(a.get("name",""))=="lookup_ext":
-            proj,job,df=context_for(e)
-            schema_out=schema_out_from_DISchema(e, pm, cur_schema)
-            # try named KV first
-            dsx,schx,tbx = extract_lookup_from_call(" ".join([f'{k}="{v}"' for k,v in a.items()]), is_ext=True)
-            if not dsx:
-                # fallback to any inner text
-                dsx,schx,tbx = extract_lookup_from_call(collect_text(e), is_ext=True)
-            if dsx and tbx and schema_out:
-                k = (proj,job,df,_norm_key(dsx),_norm_key(schx),_norm_key(tbx))
-                remember_display(dsx,schx,tbx)
-                lookup_ext_pos[k].add(schema_out)
-                seen_ext_keys.add(k)  # mark as captured via FUNCTION_CALL (authoritative)
-
-        # ------- generic / fallback parsing for lookup & lookup_ext -------
-        if tag in ("diexpression","diattribute","function_call"):
-            blob = " ".join([f'{k}="{v}"' for k,v in a.items()]) + " " + collect_text(e)
-            proj,job,df=context_for(e)
-            schema_out=schema_out_from_DISchema(e, pm, cur_schema)
-            col=find_output_column(e, pm)
-
-            # lookup_ext fallback ONLY if not already captured from FUNCTION_CALL
-            if HAS_LOOKUP_EXT.search(blob):
-                dsx,schx,tbx=extract_lookup_from_call(blob, is_ext=True)
-                if dsx and tbx and schema_out:
-                    k = (proj,job,df,_norm_key(dsx),_norm_key(schx),_norm_key(tbx))
-                    if k not in seen_ext_keys:
-                        remember_display(dsx,schx,tbx)
-                        lookup_ext_pos[k].add(schema_out)
-
-            # lookup fallback
-            if HAS_LOOKUP.search(blob) or (tag=="function_call" and lower(a.get("name",""))=="lookup"):
-                dsl,schl,tbl=extract_lookup_from_call(blob, is_ext=False)
-                if dsl and tbl and schema_out and col:
-                    remember_display(dsl,schl,tbl)
-                    lookup_pos[(proj,job,df,_norm_key(dsl),_norm_key(schl),_norm_key(tbl))]\
-                        .append(f"{schema_out}>>{col}")
-
-    # ---------- finalize rows ----------
-    def nice_names(dsN, schN, tblN):
-        k=(dsN, schN, tblN)
-        return ( display_ds[k].get(dsN), display_sch[k].get(schN), display_tbl[k].get(tblN) )
-
+    # ----------------- build dataframe -----------------
     Row = namedtuple("Row", [
-        "project_name","job_name","dataflow_name","role",
-        "datastore","schema","table","lookup_position","in_transf_used_count"
+        "project_name","job_name","dataflow_name",
+        "role","datastore","schema","table",
+        "lookup_position","in_transf_used_count"
     ])
     rows=[]
 
-    # lookups
-    for (proj,job,df,dsN,schN,tblN), positions in lookup_pos.items():
-        uniq=sorted(dedupe([p.strip() for p in positions if p and p.strip()]))
-        if not uniq: continue
-        dsD,schD,tblD=nice_names(dsN,schN,tblN)
-        rows.append(Row(proj or "", job or "", df or "", "lookup",
-                        dsD, schD, tblD, ", ".join(uniq), len(uniq)))
+    # lookups (column-level)
+    for (p,j,d,dsN,schN,tblN), pos in lookup_pos.items():
+        positions = ", ".join(sorted(dedupe([_pretty(x) for x in pos if x])))
+        rows.append(Row(p or "", j or "", d or "", "lookup",
+                        _pretty(dsN), _pretty(schN), _pretty(tblN),
+                        positions, len([1 for _ in positions.split(",") if _.strip()])))
 
-    # lookup_ext
-    for (proj,job,df,dsN,schN,tblN), posset in lookup_ext_pos.items():
-        uniq=sorted(dedupe([p.strip() for p in posset if p and p.strip()]))
-        dsD,schD,tblD=nice_names(dsN,schN,tblN)
-        rows.append(Row(proj or "", job or "", df or "", "lookup_ext",
-                        dsD, schD, tblD, ", ".join(uniq), len(uniq)))
+    # lookup_ext (schema-level)
+    for (p,j,d,dsN,schN,tblN), posset in lookup_ext_s.items():
+        positions = ", ".join(sorted(dedupe([_pretty(x) for x in posset if x])))
+        rows.append(Row(p or "", j or "", d or "", "lookup_ext",
+                        _pretty(dsN), _pretty(schN), _pretty(tblN),
+                        positions, len([1 for _ in positions.split(",") if _.strip()])))
 
-    # sources / targets
-    for (proj,job,df,role,dsN,schN,tblN) in sorted(source_target):
-        dsD,schD,tblD=nice_names(dsN,schN,tblN)
-        rows.append(Row(proj or "", job or "", df or "", role,
-                        dsD, schD, tblD, "", 0))
+    # sources/targets
+    for (p,j,d,role,dsN,schN,tblN, dsD,schD,tblD) in sorted(source_target):
+        rows.append(Row(p or "", j or "", d or "", role,
+                        _pretty(dsD), _pretty(schD), _pretty(tblD),
+                        "", 0))
 
     df = pd.DataFrame(rows)
+    if df.empty: return df
 
-    if df.empty:
-        return df
-
-    # strict dedupe by normalized key and merge positions
-    def nkey(r):
+    # strict dedupe on normalized key and merge positions
+    def k(r):
         return (r["project_name"], r["job_name"], r["dataflow_name"], r["role"],
                 _norm_key(r["datastore"]), _norm_key(r["schema"]), _norm_key(r["table"]))
-    df["__k__"]=df.apply(nkey, axis=1)
+    df["__k__"]=df.apply(k, axis=1)
     agg=(df.groupby(["__k__","project_name","job_name","dataflow_name","role",
                      "datastore","schema","table"], dropna=False, as_index=False)
-            .agg({"lookup_position": lambda s: ", ".join(sorted(dedupe([x.strip() for x in s if str(x).strip()])))}))
-    df=agg.drop(columns=["__k__"])
-    df["in_transf_used_count"]=df["lookup_position"].apply(lambda x: len([p for p in dedupe([pp.strip() for pp in str(x).split(",")]) if p]))
+            .agg({"lookup_position": lambda s: ", ".join(sorted(dedupe([_pretty(x) for x in s if str(x).strip()]))) }))
+    df=agg.drop(columns="__k__")
+    df["in_transf_used_count"]=df["lookup_position"].apply(lambda x: len([1 for _ in str(x).split(",") if _.strip()]))
 
-    # final display cleanup
-    for c in ("datastore","schema","table"): df[c]=df[c].map(_pretty)
-
-    df=df.sort_values(by=["project_name","job_name","dataflow_name","role","datastore","schema","table"]).reset_index(drop=True)
-    return df
-
-# ------------------------ main ------------------------
-
-def main():
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    # EDIT THESE PATHS:
-    xml_path = r"C:\path\to\export.xml"                     # your SAP DS export (project/job/df)
-    out_xlsx = r"C:\path\to\export_xml_lineage_final.xlsx"  # output Excel
-    # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
-    df = parse_single_xml(xml_path)
-
-    # enforce template columns & order
+    # column order / final clean
     cols = ["project_name","job_name","dataflow_name","role","datastore","schema","table","lookup_position","in_transf_used_count"]
     for c in cols:
         if c not in df.columns: df[c]=""
-    df = df[cols]
+    df = df[cols].sort_values(by=["project_name","job_name","dataflow_name","role","datastore","schema","table"]).reset_index(drop=True)
+    return df
+
+# ------------------------ main ------------------------
+def main():
+    # >>>>>> EDIT THESE <<<<<<
+    xml_path = r"C:\path\to\your\export.xml"                      # project/job/df level export
+    out_xlsx = r"C:\path\to\export_xml_lineage_final.xlsx"
+    # >>>>>>>>>>>>>>>>>>>>>>>>
+
+    df = parse_single_xml(xml_path)
 
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as xw:
         df.to_excel(xw, index=False, sheet_name="lineage")
 
-    print(f"Done. Wrote: {out_xlsx}  |  Rows: {len(df)}")
+    print(f"Done. Rows: {len(df)}  ->  {out_xlsx}")
 
 if __name__ == "__main__":
     main()
