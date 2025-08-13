@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 08/12 --working code with , source ,target , all lookup , lookupext , df name ,job, name ,project ,name 
+# 08/13 --updated script the read source and target if tehy are file 
 
 import re
 import xml.etree.ElementTree as ET
