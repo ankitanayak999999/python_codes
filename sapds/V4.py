@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 08/12 - WORKING CODE ,WITH ALL LOOKP CAPTURED 
 
 import re
 import xml.etree.ElementTree as ET
