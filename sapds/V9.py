@@ -72,6 +72,8 @@ class NameBag:
 DF_TAGS       = ("didataflow","dataflow","dflow")
 JOB_TAGS      = ("dijob","dibatchjob","job","batch_job")
 PROJECT_TAGS  = ("diproject","project")
+WF_TAGS       = ("diworkflow","workflow")
+CALLSTEP_TAGS = ("dicallstep","callstep")
 FUNCTION_DEF_TAGS = (
     "discriptfunction","dicustomfunction","difunction","userfunction",
     "diuserfunction","diuserdefinedfunction","scriptfunction"
@@ -137,6 +139,91 @@ def build_df_project_map(root):
         for dn in df_names: df_proj.setdefault(dn, only)
     return df_proj
 
+def build_df_job_map(root):
+    """Map each Dataflow -> Job by following CallSteps (Job/Workflow -> Workflow/Dataflow)."""
+    pm={c:p for p in root.iter() for c in p}
+    df_names = collect_df_names(root)
+    df_canon = {re.sub(r'[^A-Z0-9]','',n.upper()): n for n in df_names}
+
+    jobs={},{}
+    jobs = {}
+    wfs  = {}
+    for n in root.iter():
+        t=lower(strip_ns(getattr(n,"tag","")))
+        if t in JOB_TAGS:
+            nm=_job_name_from_node(n)
+            if nm: jobs[nm]=n
+        elif t in WF_TAGS:
+            nm=(n.attrib.get("name") or n.attrib.get("displayName") or "").strip()
+            if nm: wfs[nm]=n
+
+    edges=defaultdict(set)  # (kind, canon_name) -> set((kind, canon_name))
+
+    def canon(s): return re.sub(r'[^A-Z0-9]','',(s or '').upper())
+    def add_edge(src_kind, src_name, dst_kind, dst_name):
+        if src_name and dst_name:
+            edges[(src_kind, canon(src_name))].add((dst_kind, canon(dst_name)))
+
+    for cs in root.iter():
+        if lower(strip_ns(getattr(cs,"tag",""))) not in CALLSTEP_TAGS: continue
+
+        # find source (job/workflow) by walking up
+        src_kind, src_name = None, None
+        cur=cs
+        for _ in range(200):
+            cur=pm.get(cur)
+            if not cur: break
+            t=lower(strip_ns(cur.tag))
+            if t in JOB_TAGS: src_kind,src_name="job",_job_name_from_node(cur); break
+            if t in WF_TAGS:  src_kind,src_name="wf",(cur.attrib.get("name") or cur.attrib.get("displayName") or ""); break
+        if not src_name: continue
+
+        a=attrs_ci(cs)
+        tgt_type=(a.get("calledobjecttype") or a.get("type") or "").strip().lower()
+        # collect possible names
+        names=[]
+        for k in ("calledobject","name","object","target","called_object"):
+            if a.get(k):
+                raw=a.get(k); names.append(raw)
+                if any(sep in raw for sep in ["/","\\",".",":"]):
+                    names.append(raw.split("/")[-1].split("\\")[-1].split(":")[-1].split(".")[-1])
+
+        txt=" ".join([*a.values()])
+
+        if tgt_type in ("workflow","diworkflow"):
+            for nm in names: add_edge(src_kind,src_name,"wf",nm)
+        elif tgt_type in ("dataflow","didataflow"):
+            for nm in names: add_edge(src_kind,src_name,"df",nm)
+        else:
+            # fallback: text contains known wf/df names
+            for w in wfs.keys():
+                if canon(w) in canon(txt): add_edge(src_kind,src_name,"wf",w)
+            for d in df_names:
+                if canon(d) in canon(txt): add_edge(src_kind,src_name,"df",d)
+
+    # reachability: Job -> (via wf) -> df
+    df_job={}
+    for j in jobs.keys():
+        start=("job", canon(j)); seen={start}; stack=[start]; reach=set()
+        while stack:
+            node=stack.pop()
+            for nxt in edges.get(node,()):
+                if nxt in seen: continue
+                seen.add(nxt)
+                kind, nm = nxt
+                if kind=="df":
+                    real=df_canon.get(nm)
+                    if real: reach.add(real)
+                else:
+                    stack.append(nxt)
+        for d in reach: df_job.setdefault(d, j)
+
+    if len(jobs)==1:
+        only=list(jobs.keys())[0]
+        for d in df_names: df_job.setdefault(d, only)
+
+    return df_job
+
 # ================================================================
 # DISchema / Element helpers (for transformation positions)
 # ================================================================
@@ -152,11 +239,9 @@ def schema_out_from_DISchema(e, pm, fallback=""):
     return best or join or fallback
 
 def find_output_column(e, pm):
-    # Direct element?
     if lower(strip_ns(getattr(e,"tag","")))=="dielement":
         nm=(attrs_ci(e).get("name") or "").strip()
         if nm: return nm
-    # Walk up to find the enclosing DIElement
     cur=e
     for _ in range(200):
         if cur is None: break
@@ -197,6 +282,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 
     job_to_project = build_job_to_project_map(root)
     df_to_project  = build_df_project_map(root)
+    df_to_job      = build_df_job_map(root)  # NEW: infer job for DFs via CallSteps
 
     # friendly-name caches
     display_ds  = defaultdict(NameBag)
@@ -232,7 +318,9 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             if not proj and t in PROJECT_TAGS: proj = nm or proj
             if t in JOB_TAGS and not job: job = _job_name_from_node(a) or job
         df  = df or cur_df
-        job = job or (last_job if not cur_job else cur_job)
+        # prefer mapping from CallSteps when ancestor job not present
+        job = job or df_to_job.get(df, None) or (last_job if not cur_job else cur_job)
+        # project from job map or DF containment
         proj = job_to_project.get(job, proj or df_to_project.get(df, cur_proj))
         if df and (df not in df_context): df_context[df]=(proj or "", job or "")
         return proj or "", job or "", df or ""
@@ -307,7 +395,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
             source_target.add(key)
 
-        # ---- 3) CUSTOM SQL (kept same behavior as V8)
+        # ---- 3) CUSTOM SQL (same as V8)
         if tag in ("sqltext","sqltexts","diquery","ditransformcall"):
             sql_text=""
             if tag in ("sqltext","sqltexts"):
@@ -327,10 +415,9 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         disp_name=at.get("value","").strip() or disp_name
                     if tt=="dischema" and not disp_name:
                         disp_name=(at.get("name") or "").strip() or disp_name
-                # simple table list from SQL
+                # tables & datastore
                 tables=extract_tables_from_sql(sql_text)
                 table_csv=", ".join(tables) if tables else "SQL_TEXT"
-                # datastore near SQL (heuristic)
                 ds_for_sql=""
                 for up in ancestors(e, pm, 12):
                     for ch in up.iter():
@@ -353,18 +440,18 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             proj,job,df = context_for(e)
             an  = attrs_ci(e)
             cal = (an.get("name") or "").strip().lower()
+
+            # record external function callsites for later expansion (functions that contain lookups)
             if cal not in ("lookup","lookup_ext"):
-                # record external function positions for later expansion
-                # (this covers functions that themselves contain lookups)
                 schema_out = schema_out_from_DISchema(e, pm, cur_schema)
                 col        = find_output_column(e, pm)
                 if schema_out:
                     pos = f"{schema_out}>>{col}" if col else schema_out
                     fn_key = normalize_fn_name(an.get("name") or "")
-                    df_func_positions[df][fn_key].add(pos)
+                    if fn_key: df_func_positions[df][fn_key].add(pos)
                 continue
 
-            # Position for this specific lookup call
+            # Position for this lookup call
             schema_out = schema_out_from_DISchema(e, pm, cur_schema)
             col        = find_output_column(e, pm)
             pos        = f"{schema_out}>>{col}" if (schema_out and col) else (schema_out or "")
@@ -375,42 +462,40 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             tbl = an.get("tablename") or ""
             ln  = line_no(e)
 
+            role = "lookup_ext" if cal=="lookup_ext" else "lookup"
+
             # If missing DS/schema/table, still emit a placeholder row
             if not (ds and tbl):
                 missing_lookup.append(Record(
-                    proj, job, df, "lookup_ext" if cal=="lookup_ext" else "lookup",
+                    proj, job, df, role,
                     ds or "<missing>", sch or "<missing>", tbl or "<missing>",
                     pos, 1, "", ln
                 ))
             else:
                 remember_display(ds, sch, tbl)
                 key = (proj, job, df, _norm_key(ds), _norm_key(sch), _norm_key(tbl))
-                if cal == "lookup_ext":
+                if role == "lookup_ext":
                     lookup_ext_pos[key][pos].add(ln)
                 else:
                     lookup_pos[key][pos].add(ln)
 
-            # Also note that this DF contains a callsite of a function by this name,
-            # so if this particular call was to a *user function* we will expand later.
-            if cal not in ("lookup","lookup_ext"):
-                fn_key = normalize_fn_name(an.get("name") or "")
-                if fn_key:
-                    schema_for_fn = schema_out_from_DISchema(e, pm, cur_schema)
-                    col_for_fn    = find_output_column(e, pm)
-                    pos2          = f"{schema_for_fn}>>{col_for_fn}" if (schema_for_fn and col_for_fn) else (schema_for_fn or "")
-                    if pos2:
-                        df_func_positions[df][fn_key].add(pos2)
-
     # ---- 5) Expand lookups that live inside external function definitions
+    def normalize_fn_name(name: str) -> str:
+        if not name: return ""
+        s = name.strip()
+        for sep in ("::","/","."):
+            if sep in s: s=s.split(sep)[-1]
+        return re.sub(r'[^A-Z0-9]','',s.upper())
+
     for df_name, fn_map in df_func_positions.items():
         proj,job = df_context.get(df_name, ("",""))
         if not proj:
+            inferred_job = df_to_job.get(df_name, "")
+            job = job or inferred_job
             proj = job_to_project.get(job, "") or df_to_project.get(df_name, "")
         for fn_key, positions in fn_map.items():
             for role, ds, sch, tbl, ln in fn_lookup_calls.get(fn_key, []):
-                dsN, schN, tblN = _norm_key(ds), _norm_key(sch), _norm_key(tbl)
-                if not ds or not tbl:
-                    # even if missing, emit placeholders so you can see the event
+                if not (ds and tbl):
                     for p in positions:
                         missing_lookup.append(Record(
                             proj, job, df_name, role,
@@ -419,13 +504,11 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         ))
                     continue
                 remember_display(ds, sch, tbl)
-                key = (proj, job, df_name, dsN, schN, tblN)
+                key = (proj, job, df_name, _norm_key(ds), _norm_key(sch), _norm_key(tbl))
                 if role == "lookup_ext":
-                    for p in positions:
-                        lookup_ext_pos[key][p].add(ln)
+                    for p in positions: lookup_ext_pos[key][p].add(ln)
                 else:
-                    for p in positions:
-                        lookup_pos[key][p].add(ln)
+                    for p in positions: lookup_pos[key][p].add(ln)
 
     # ================================================================
     # Finalize rows (merge positions, dedupe, sort)
@@ -494,9 +577,6 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         )
     df["__k__"]=df.apply(nkey, axis=1)
 
-    def merge_pos(series):  # we already key by exact position, so this is trivial; still normalize
-        return ", ".join(sorted(dedupe([p.strip() for p in series if str(p).strip()])))
-
     df=(df.groupby(
             ["__k__","project_name","job_name","dataflow_name","role",
              "datastore","schema","table","custom_sql_text","transformation_position"],
@@ -520,7 +600,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 # ================================================================
 
 def main():
-    # keep these defaults (you can change them before running)
+    # Update paths as needed
     xml_path = r"C:\Users\raksahu\Downloads\python\input\export_afs.xml"
     out_xlsx = r"C:\Users\raksahu\Downloads\python\input\output_v9_afs.xlsx"
 
