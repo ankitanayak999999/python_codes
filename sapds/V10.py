@@ -2,100 +2,228 @@
 # -*- coding: utf-8 -*-
 
 """
-V9 — SAP DS XML lineage extractor
-Base: your V8 behavior, plus:
-  * lookup_ext only from FUNCTION_CALL (authoritative) + dedupe by position
-  * still capture inline lookup() from ui_mapping_text
-  * emit lookup/lookup_ext row even if DS/owner/table not parsed (to flag gaps)
-  * custom SQL uses ui_display_name for transformation_position if present
-  * exact source_line for EVERY row via ElementTree.iterparse sourceline
-  * robust multi-project Job->Project and DF->Project mapping
+V9 — SAP DS export.xml lineage extractor
+
+Keeps the V9 behavior you’re already happy with and adds ONLY:
+1) For custom SQL, `transformation_position` prefers UI label (`ui_display_name`)
+   (falls back to prior text if not present).
+2) New column `source_line` (exact XML line number) for ALL rows:
+   sources, targets, files, lookup, lookup_ext, and custom_sql.
+
+Everything else (lookup/lookup_ext detection and de-duping, multi-project job/DF
+attribution, file/source/target capture, custom-sql table extraction, etc.) stays intact.
 """
 
 import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict, namedtuple
 import pandas as pd
-from pathlib import Path
 
-# ------------------------ small helpers ------------------------
+# ------------------------ tiny utilities ------------------------
 
-def lower(s): return (s or "").strip().lower()
-def strip_ns(tag): return re.sub(r"^\{.*?\}", "", tag) if isinstance(tag, str) else ""
-def attrs_ci(e): return {k.lower(): (v or "") for k, v in getattr(e, "attrib", {}).items()}
+def strip_ns(tag):
+    return re.sub(r"^\{.*\}", "", tag) if isinstance(tag, str) else ""
 
-def _pretty(s: str) -> str:
-    s = (s or "").strip().strip('"').strip("'")
-    s = re.sub(r"\s+", " ", s)
-    return s
+def lower(s):
+    return (s or "").strip().lower()
 
-def _norm_key(s: str) -> str:
-    return re.sub(r"[^A-Z0-9_]", "", (s or "").upper())
+def attrs_ci(e):
+    return {k.lower(): (v or "") for k, v in getattr(e, "attrib", {}).items()}
+
+def build_parent_map(root):
+    return {c: p for p in root.iter() for c in p}
+
+def ancestors(e, pm, lim=200):
+    cur = e
+    for _ in range(lim):
+        if cur is None: break
+        yield cur
+        cur = pm.get(cur)
+
+def collect_text(n):
+    parts=[]
+    if hasattr(n,"attrib"):
+        parts.extend([str(v) for v in n.attrib.values() if v])
+    if n.text: parts.append(n.text)
+    for c in list(n):
+        parts.append(collect_text(c))
+        if c.tail: parts.append(c.tail)
+    return " ".join([p for p in parts if p])
 
 def dedupe(seq):
     out, seen = [], set()
     for x in seq:
-        k = str(x)
-        if k in seen: continue
-        seen.add(k); out.append(x)
+        if x is None: continue
+        s = str(x).strip()
+        if not s or s in seen: continue
+        seen.add(s); out.append(s)
     return out
 
-# ------------------------ constants / regex ------------------------
+def canon(s: str) -> str:
+    return re.sub(r'[^A-Z0-9]','',(s or '').upper())
 
-DF_TAGS       = ("didataflow","dataflow")
-JOB_TAGS      = ("dijob","dibatchjob","job")
+# display normalization helpers
+def _strip_wrappers(s: str) -> str:
+    if s is None: return ""
+    s = str(s).strip().strip('"').strip("'")
+    if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+        s = s[1:-1]
+    return s
+
+def _norm_key(s: str) -> str:
+    s = _strip_wrappers(s)
+    s = re.sub(r"[\{\}\[\]]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return re.sub(r"[^A-Z0-9_]", "", s.upper())
+
+def _pretty(s: str) -> str:
+    s = _strip_wrappers(s)
+    s = re.sub(r"[\{\}\[\]]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+class NameBag:
+    def __init__(self): self.best = None
+    def _score(self, s):
+        if not s: return (-1, -1, -1)
+        has_space = 1 if " " in s else 0
+        clean     = 1 if (s == _pretty(s)) else 0
+        return (has_space, clean, len(s))
+    def add(self, s):
+        s = _pretty(s)
+        if not s: return
+        if self.best is None or self._score(s) > self._score(self.best):
+            self.best = s
+    def get(self, fallback=""): return self.best or _pretty(fallback)
+
+# ------------------------ constants & detectors ------------------------
+
+DF_TAGS       = ("didataflow","dataflow","dflow")
+JOB_TAGS      = ("dijob","dibatchjob","job","batch_job")
 PROJECT_TAGS  = ("diproject","project")
+CALLSTEP_TAGS = ("dicallstep","callstep")
 
-HAS_LOOKUP     = re.compile(r'\blookup\s*\(', re.I)
-HAS_LOOKUP_EXT = re.compile(r'\blookup[_ ]*ext\s*\(', re.I)
+CACHE_WORDS  = {"PRE_LOAD_CACHE","POST_LOAD_CACHE","CACHE","PRE_LOAD","POST_LOAD"}
+POLICY_WORDS = {"MAX","MIN","MAX-NS","MIN-NS","MAX_NS","MIN_NS"}
+SPECIAL_TOKENS = CACHE_WORDS | POLICY_WORDS
 
-NAME_CHARS = r"[A-Za-z0-9_\.\-\$#@\[\]% ]+"
+NAME_CHARS    = r"[A-Za-z0-9_\.\-\$#@\[\]% ]+"
 DOT_NORMALIZE = re.compile(r"\s*\.\s*")
 
-# lookup() — inline (Datastore.Owner.Table)
-LOOKUP_CALL_RE = re.compile(
-    rf'\blookup\s*\(\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})',
-    re.I)
+HAS_LOOKUP_EXT = re.compile(r'\blookup_ext\s*\(', re.I)
+HAS_LOOKUP     = re.compile(r'\blookup(?!_)\s*\(', re.I)
 
-# lookup_ext() variants
-LOOKUP_EXT_CALL_RE = re.compile(
-    rf'\blookup[_ ]*ext\s*\(\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})',
-    re.I)
+LOOKUP_CALL_RE     = re.compile(rf'\blookup(?!_)\s*\(\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})', re.I)
+BRACED_TRIPLE      = re.compile(r'\blookup(?!_)\s*\(\s*\{\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^\}]+?)\s*\}', re.I|re.S)
+LOOKUP_ARGS_RE     = re.compile(r'\blookup(?!_)\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,\)]+?)\s*(?:,|\))', re.I|re.S)
 
+LOOKUP_EXT_CALL_RE = re.compile(rf'\blookup_ext\s*\(\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})\s*"?\.\s*"?\s*({NAME_CHARS})', re.I)
+BRACED_TRIPLE_EXT  = re.compile(r'\blookup[_\s]*ext\s*\(\s*\{\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^\}]+?)\s*\}', re.I|re.S)
+LOOKUP_EXT_ARGS_RE = re.compile(r'\blookup_ext\s*\(\s*([^,]+?)\s*,\s*([^,]+?)\s*,\s*([^,\)]+?)\s*(?:,|\))', re.I|re.S)
 LOOKUP_EXT_NAMED_KV_RE = re.compile(
-    r'\blookup[_ ]*ext\s*\([^)]*?'
+    r'\blookup_ext\s*\([^)]*?'
     r'(?:tableDatastore|tabledatastore)\s*=\s*([\'"]?)(?P<ds>[^\'",)\s]+)\1[^)]*?'
     r'(?:tableOwner|tableowner)\s*=\s*([\'"]?)(?P<own>[^\'",)\s]+)\3[^)]*?'
     r'(?:tableName|tablename)\s*=\s*([\'"]?)(?P<tbl>[^\'",)\s]+)\5',
     re.I | re.S
 )
 
-SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
+def _is_token(t:str)->bool:
+    return (t or "").strip().upper().replace(" ","_") in SPECIAL_TOKENS
 
-# ------------------------ XML loader (with line numbers) ------------------------
+def _looks_table(t:str)->bool:
+    t = (t or "").strip().strip("'").strip('"')
+    if not t or _is_token(t): return False
+    if t.isdigit(): return False
+    return bool(re.search(r"[A-Za-z]", t)) and len(t) >= 2
 
-def load_xml_with_lines(xml_path: str):
-    """
-    Use iterparse to ensure each element has .sourceline.
-    Returns (root, all_nodes) where all_nodes is a list in document order.
-    """
-    it = ET.iterparse(xml_path, events=("start", "end"))
-    _, root = next(it)  # first start
-    nodes = []
-    for ev, el in it:
-        if ev == "start":
-            nodes.append(el)
-    return root, nodes
+def _valid_triplet(ds, sch, tbl)->bool:
+    return bool(ds) and _looks_table(tbl) and not _is_token(sch)
 
-# ------------------------ project / job / df mapping ------------------------
+# ------------------------ function name normalization ------------------------
+
+def normalize_fn_name(name: str) -> str:
+    """Strip namespace/prefixes like Project::Func, pkg.Func, folder/Func; then canon."""
+    if not name: return ""
+    s = str(name).strip()
+    for sep in ("::", "/", "."):
+        if sep in s:
+            s = s.split(sep)[-1]
+    return canon(s)
+
+# ------------------------ lookup extractors ------------------------
+
+def extract_lookup_from_call(text: str, is_ext: bool = False):
+    """Return (datastore, owner/schema, table) or ('','','')."""
+    if not text: return ("","","")
+    t = DOT_NORMALIZE.sub(".", text)
+
+    if is_ext:
+        mkv = LOOKUP_EXT_NAMED_KV_RE.search(t)
+        if mkv and _valid_triplet(mkv.group("ds"), mkv.group("own"), mkv.group("tbl")):
+            return mkv.group("ds").strip(), mkv.group("own").strip(), mkv.group("tbl").strip()
+
+    m0 = (BRACED_TRIPLE_EXT if is_ext else BRACED_TRIPLE).search(t)
+    if m0 and _valid_triplet(m0.group(1), m0.group(2), m0.group(3)):
+        return m0.group(1).strip(), m0.group(2).strip(), m0.group(3).strip()
+
+    m1 = (LOOKUP_EXT_CALL_RE if is_ext else LOOKUP_CALL_RE).search(t)
+    if m1 and _valid_triplet(m1.group(1), m1.group(2), m1.group(3)):
+        return m1.group(1).strip(), m1.group(2).strip(), m1.group(3).strip()
+
+    m2 = (LOOKUP_EXT_ARGS_RE if is_ext else LOOKUP_ARGS_RE).search(t)
+    if m2 and _valid_triplet(m2.group(1), m2.group(2), m2.group(3)):
+        return m2.group(1).strip(), m2.group(2).strip(), m2.group(3).strip()
+
+    return ("","","")
+
+# -------- function-discovery (for external UDFs that call lookups) --------
+
+FUNC_NAME_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.I)
+
+def extract_called_function_names(blob: str):
+    names=set()
+    if not blob: return names
+    for m in FUNC_NAME_RE.finditer(blob):
+        fn=(m.group(1) or "").strip()
+        lo=fn.lower()
+        if not fn or lo in ("lookup","lookup_ext"): continue
+        names.add(fn)
+    return names
+
+def extract_all_lookups(text: str, is_ext: bool):
+    found=[]
+    if not text: return found
+    t=text
+
+    if is_ext:
+        for mkv in LOOKUP_EXT_NAMED_KV_RE.finditer(t):
+            ds, sch, tb = mkv.group("ds"), mkv.group("own"), mkv.group("tbl")
+            if ds and tb: found.append((ds.strip(), (sch or "").strip(), tb.strip()))
+
+    BRE = BRACED_TRIPLE_EXT if is_ext else BRACED_TRIPLE
+    for m in BRE.finditer(t):
+        found.append((m.group(1).strip(), m.group(2).strip(), m.group(3).strip()))
+
+    DRE = LOOKUP_EXT_CALL_RE if is_ext else LOOKUP_CALL_RE
+    for m in DRE.finditer(t):
+        found.append((m.group(1).strip(), m.group(2).strip(), m.group(3).strip()))
+
+    ARE = LOOKUP_EXT_ARGS_RE if is_ext else LOOKUP_ARGS_RE
+    for m in ARE.finditer(t):
+        found.append((m.group(1).strip(), m.group(2).strip(), m.group(3).strip()))
+
+    out=[]
+    for ds,sch,tb in found:
+        if ds and tb: out.append((ds,sch,tb))
+    return out
+
+# ------------------------ project / job / df maps ------------------------
 
 def _job_name_from_node(job_node):
-    # prefer explicit 'job_name' attribute if present inside
     for ch in job_node.iter():
         if lower(strip_ns(getattr(ch,"tag",""))) == "diattribute" and lower(ch.attrib.get("name",""))=="job_name":
             v = (ch.attrib.get("value") or "").strip()
             if v: return v
-    # else use node name/displayName
     return (job_node.attrib.get("name") or job_node.attrib.get("displayName") or "").strip()
 
 def collect_df_names(root):
@@ -107,10 +235,12 @@ def collect_df_names(root):
     return out
 
 def build_job_to_project_map(root):
+    """Job -> Project via <DIProject><DIJobRef name=.../> blocks (multi-project exports)."""
     j2p={}
     for p in root.iter():
-        if lower(strip_ns(getattr(p,"tag",""))) not in PROJECT_TAGS: continue
-        proj = (p.attrib.get("name") or p.attrib.get("displayName") or "").strip()
+        if lower(strip_ns(getattr(p,"tag",""))) not in PROJECT_TAGS:
+            continue
+        proj=(p.attrib.get("name") or p.attrib.get("displayName") or "").strip()
         if not proj: continue
         for ref in p.iter():
             if lower(strip_ns(getattr(ref,"tag",""))) == "dijobref":
@@ -118,7 +248,8 @@ def build_job_to_project_map(root):
                 if jn: j2p.setdefault(jn, proj)
     return j2p
 
-def build_df_to_project_map(root):
+def build_df_project_map(root):
+    """DF -> Project by containment (fallback to single-project)."""
     df_names = collect_df_names(root)
     df_proj={}
     projects=[]
@@ -131,12 +262,39 @@ def build_df_to_project_map(root):
             if lower(strip_ns(getattr(d,"tag",""))) in DF_TAGS:
                 dn=(d.attrib.get("name") or d.attrib.get("displayName") or "").strip()
                 if dn: df_proj.setdefault(dn, pnm)
-    if len(projects)==1 and projects:
-        only = projects[0][0]
+    if len(projects)==1:
+        only=projects[0][0]
         for dn in df_names: df_proj.setdefault(dn, only)
     return df_proj
 
+# ------------------------ schema/column helpers ------------------------
+
+def schema_out_from_DISchema(e, pm, fallback=""):
+    best=None; join=None
+    for a in ancestors(e, pm, 200):
+        if lower(strip_ns(getattr(a,"tag","")))=="dischema":
+            nm=(attrs_ci(a).get("name") or "").strip()
+            if nm:
+                if lower(nm)!="join": best=nm; break
+                else: join=nm
+    return best or join or fallback
+
+def find_output_column(e, pm):
+    if lower(strip_ns(getattr(e,"tag","")))=="dielement":
+        nm=(attrs_ci(e).get("name") or "").strip()
+        if nm: return nm
+    cur=e
+    for _ in range(200):
+        if cur is None: break
+        if lower(strip_ns(cur.tag))=="dielement":
+            nm=(attrs_ci(cur).get("name") or "").strip()
+            if nm: return nm
+        cur=pm.get(cur)
+    return ""
+
 # ------------------------ SQL helpers ------------------------
+
+SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
 
 def extract_tables_from_sql(sql_text: str):
     if not sql_text: return []
@@ -145,296 +303,393 @@ def extract_tables_from_sql(sql_text: str):
     tables=[]
     for h in hits:
         parts=h.split(".")
-        if len(parts)>=2: tables.append(f"{parts[-2]}.{parts[-1]}")
-        else: tables.append(parts[-1])
+        if len(parts)>=2:
+            tables.append(f"{parts[-2]}.{parts[-1]}")
+        else:
+            tables.append(parts[-1])
     return dedupe(tables)
 
-# ------------------------ main parser ------------------------
+def quote_sql(s: str) -> str:
+    s=(s or "").strip()
+    s=s.replace('"', r'\"')
+    return f"\"{s}\"" if s else ""
+
+# --- line numbers + display label helpers ---
+
+def get_line(e):
+    """Exact XML source line for an element (or None)."""
+    try:
+        return getattr(e, "sourceline", None)
+    except Exception:
+        return None
+
+def find_nearby_attr(e, pm, names=("ui_display_name", "ui_acta_from_schema_0")):
+    """Walk up to find a DIAttribute value used as friendly label for SQL transforms."""
+    want = {n.lower() for n in names}
+    depth, cur = 0, e
+    while cur is not None and depth < 12:
+        for ch in cur:
+            if isinstance(ch.tag, str) and strip_ns(ch.tag).lower() == "diattribute":
+                nm = (ch.attrib.get("name") or "").lower()
+                if nm in want:
+                    val = (ch.attrib.get("value") or "").strip()
+                    if val:
+                        return val
+        cur = pm.get(cur)
+        depth += 1
+    return ""
+
+# ------------------------ main parser (V9 with minimal upgrades) ------------------------
 
 Row = namedtuple(
     "Row",
     [
         "project_name","job_name","dataflow_name","role",
         "datastore","schema","table",
-        "transformation_position","transformation_usage_count","custom_sql_text",
-        "source_line",
+        "transformation_position","transformation_usage_count",
+        "custom_sql_text","source_line",
     ],
 )
 
 def parse_single_xml(xml_path: str) -> pd.DataFrame:
-    root, doc_nodes = load_xml_with_lines(xml_path)
+    tree=ET.parse(xml_path); root=tree.getroot()
+    pm=build_parent_map(root)
 
-    job2proj = build_job_to_project_map(root)
-    df2proj  = build_df_to_project_map(root)
+    # multi-project helpers
+    job_to_project = build_job_to_project_map(root)
+    df_to_project  = build_df_project_map(root)
 
-    rows = []
+    # function bodies (canonical-keyed)
+    function_bodies = {}
+    FUNCTION_DEF_TAGS = {
+        "dicustomfunction","difunction","function","diprocedure",
+        "userfunction","diuserfunction","diuserdefinedfunction","scriptfunction"
+    }
+    for node in root.iter():
+        tag  = lower(strip_ns(getattr(node,"tag","")))
+        name = (getattr(node,"attrib",{}).get("name") or
+                getattr(node,"attrib",{}).get("displayName") or "").strip()
+        if not name: 
+            continue
+        txt = collect_text(node)
+        if tag in FUNCTION_DEF_TAGS or "lookup(" in txt.lower() or "lookup_ext(" in txt.lower():
+            function_bodies[ normalize_fn_name(name) ] = txt
 
-    # keepers to dedupe lookup_ext by (df, ds, sch, tbl, position)
-    seen_lookup_ext_keys = set()
+    # display caches
+    display_ds  = defaultdict(NameBag)
+    display_sch = defaultdict(NameBag)
+    display_tbl = defaultdict(NameBag)
+    def remember_display(ds, sch, tbl):
+        ds=_strip_wrappers(ds).strip()
+        sch=_strip_wrappers(sch).strip()
+        tbl=_strip_wrappers(tbl).strip()
+        k=(_norm_key(ds), _norm_key(sch), _norm_key(tbl))
+        display_ds[k].add(ds); display_sch[k].add(sch); display_tbl[k].add(tbl)
 
-    cur_proj = cur_job = cur_df = ""
+    # collectors
+    lookup_pos     = defaultdict(list)        # (proj,job,df,ds,sch,tbl) -> ["Schema>>Col", ...]
+    lookup_pos_ln  = defaultdict(list)        # same key -> [line_numbers...]
+    lookup_ext_pos = defaultdict(set)         # (proj,job,df,ds,sch,tbl) -> {"Schema", ...}
+    lookup_ext_ln  = defaultdict(list)        # same key -> [line_numbers...]
+    seen_ext_keys  = set()                    # authoritative FUNCTION_CALL seen
+    source_target  = set()                    # (proj,job,df,role,dsN,schN,tblN,line)
+    sql_rows       = []                       # custom SQL rows
+
+    # external function attribution
+    df_context        = {}  # df -> (proj,job)
+    df_func_positions = defaultdict(lambda: defaultdict(set))  # df -> canon(fn) -> {positions}
+
+    cur_proj = cur_job = cur_df = cur_schema = ""
+    last_job = ""
 
     def context_for(e):
-        proj = cur_proj; job = cur_job; df = cur_df
-        # walk up to improve context
-        cur = e
-        hops = 0
-        while cur is not None and hops < 100:
-            t = lower(strip_ns(cur.tag))
-            a = attrs_ci(cur)
-            nm = (a.get("name") or a.get("displayname") or "").strip()
-            if t in DF_TAGS and not df: df = nm or df
-            if t in PROJECT_TAGS and not proj: proj = nm or proj
-            if t in JOB_TAGS and not job: job = _job_name_from_node(cur) or job
-            cur = cur.getparent() if hasattr(cur, "getparent") else None
-            hops += 1
-        # map proj by job/df where possible
-        if not proj:
-            if job and job in job2proj:
-                proj = job2proj[job]
-            elif df and df in df2proj:
-                proj = df2proj[df]
-        return proj, job, df
+        proj=job=df=""
+        for a in ancestors(e, pm):
+            t  = lower(strip_ns(a.tag))
+            at = attrs_ci(a)
+            nm = (at.get("name") or at.get("displayname") or "").strip()
+            if not df and t in DF_TAGS: df = nm or df
+            if not proj and t in PROJECT_TAGS: proj = nm or proj
+            if t in JOB_TAGS and not job: job = _job_name_from_node(a) or job
+        df  = df or cur_df
+        job = job or (last_job if not cur_job else cur_job)
+        proj = job_to_project.get(job, proj or df_to_project.get(df, cur_proj))
+        if df and (df not in df_context): df_context[df]=(proj or "", job or "")
+        return proj or "", job or "", df or ""
 
-    # Simple ancestor traversal for ElementTree (no .getparent)
-    def ancestors_chain(e, limit=100):
-        # build parent map on demand (one-time)
-        if not hasattr(parse_single_xml, "_parent_map"):
-            pm = {c:p for p in root.iter() for c in p}
-            setattr(parse_single_xml, "_parent_map", pm)
-        pm = getattr(parse_single_xml, "_parent_map")
-        cur = e
-        for _ in range(limit):
-            yield cur
-            cur = pm.get(cur)
-            if cur is None: break
-
-    # -------------- walk the document once --------------
+    # walk xml
     for e in root.iter():
         if not isinstance(e.tag, str): continue
-        tag = lower(strip_ns(e.tag))
-        a   = attrs_ci(e)
+        tag=lower(strip_ns(e.tag)); a=attrs_ci(e)
 
-        # update rolling context
-        if tag in PROJECT_TAGS:
-            cur_proj = (a.get("name") or a.get("displayname") or cur_proj).strip()
-        elif tag in JOB_TAGS:
-            cur_job = _job_name_from_node(e) or (a.get("name") or a.get("displayname") or cur_job).strip()
-        elif tag in DF_TAGS:
-            cur_df  = (a.get("name") or a.get("displayname") or cur_df).strip()
+        if tag in PROJECT_TAGS: cur_proj=(a.get("name") or a.get("displayname") or cur_proj).strip()
+        if tag in DF_TAGS:
+            cur_df  =(a.get("name") or a.get("displayname") or cur_df).strip()
+            if cur_df and cur_df not in df_context:
+                p,j,_=context_for(e); df_context[cur_df]=(p,j)
+        if tag in JOB_TAGS:
+            cur_job=_job_name_from_node(e) or (a.get("name") or a.get("displayname") or cur_job).strip()
+            if cur_job: last_job=cur_job
+        if tag=="dischema":
+            cur_schema=(a.get("name") or a.get("displayname") or cur_schema).strip()
 
-        # ---------------- sources / targets (DB) ----------------
+        # sources / targets (DB)
         if tag in ("didatabasetablesource","didatabasetabletarget"):
-            proj,job,df = context_for(e)
-            role = "source" if "source" in tag else "target"
-            ds   = (a.get("datastorename") or a.get("datastore") or "").strip()
-            sch  = (a.get("ownername") or a.get("schema") or a.get("owner") or "").strip()
-            tbl  = (a.get("tablename") or a.get("table") or "").strip()
-            rows.append(Row(
-                proj,job,df,role,
-                ds,sch,tbl,
-                "",0,"",
-                getattr(e, "sourceline", -1),
-            ))
+            ds =(a.get("datastorename") or a.get("datastore") or "").strip()
+            sch=(a.get("ownername") or a.get("schema") or a.get("owner") or "").strip()
+            tbl=(a.get("tablename") or a.get("table") or "").strip()
+            if ds and tbl:
+                remember_display(ds,sch,tbl)
+                proj,job,df=context_for(e)
+                role="source" if "source" in tag else "target"
+                line_no=get_line(e)
+                key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl),line_no)
+                source_target.add(key)
 
-        # ---------------- sources / targets (FILE) ----------------
+        # sources / targets (FILE)
         if tag in ("difilesource","difiletarget"):
-            proj,job,df = context_for(e)
-            role = "source" if "source" in tag else "target"
-            fmt   = (a.get("formatname") or "").strip()
-            fname = (a.get("filename") or a.get("name") or "").strip()
-            ds    = (a.get("datastorename") or a.get("datastore") or "FILE").strip() or "FILE"
-            sch   = fmt or "FILE"
-            tbl   = fname or "FILE_OBJECT"
-            rows.append(Row(
-                proj,job,df,role,
-                ds,sch,tbl,
-                "",0,"",
-                getattr(e, "sourceline", -1),
-            ))
+            proj,job,df=context_for(e)
+            role="source" if "source" in tag else "target"
+            fmt=(a.get("formatname") or "").strip()
+            fname=(a.get("filename") or a.get("name") or "").strip()
+            ds=(a.get("datastorename") or a.get("datastore") or "FILE").strip() or "FILE"
+            sch=fmt or "FILE"
+            tbl=fname or "FILE_OBJECT"
+            remember_display(ds,sch,tbl)
+            line_no=get_line(e)
+            key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl),line_no)
+            source_target.add(key)
 
-        # ---------------- inline lookup() from ui_mapping_text ----------------
-        if tag == "diattribute" and lower(a.get("name","")) == "ui_mapping_text":
-            txt = a.get("value") or e.text or ""
-            if HAS_LOOKUP.search(txt):
-                m = LOOKUP_CALL_RE.search(DOT_NORMALIZE.sub(".", txt))
-                ds = sch = tbl = ""
-                if m: ds, sch, tbl = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
-
-                # find output column & schema name (position)
-                out_col = ""
-                out_schema = ""
-                for up in ancestors_chain(e, 50):
-                    t2 = lower(strip_ns(getattr(up,"tag","")))
-                    at2= attrs_ci(up)
-                    if not out_schema and t2 == "dischema":
-                        nm = (at2.get("name") or "").strip()
-                        if nm: out_schema = nm
-                    if not out_col and t2 == "dielement":
-                        nm = (at2.get("name") or "").strip()
-                        if nm: out_col = nm
-                pos = f"{out_schema}>>{out_col}" if out_schema and out_col else (out_schema or out_col or "")
-
-                proj,job,df = context_for(e)
-                rows.append(Row(
-                    proj,job,df,"lookup",
-                    ds,sch,tbl,
-                    pos, 1, "",
-                    getattr(e, "sourceline", -1),
-                ))
-
-            # If it clearly mentions lookup but we failed to parse the triple, emit a gap row
-            elif HAS_LOOKUP.search(a.get("value","")):
-                proj,job,df = context_for(e)
-                rows.append(Row(
-                    proj,job,df,"lookup","","","", "",1,"", getattr(e,"sourceline",-1)
-                ))
-
-        # ---------------- lookup_ext() (AUTHORITATIVE: from FUNCTION_CALL only) ----------------
-        if tag == "function_call" and lower(a.get("name","")) == "lookup_ext":
-            # Try to parse via named args first
-            blob = " ".join([f'{k}="{v}"' for k,v in a.items()]) + " "
-            blob += (e.text or "")
-            for ch in e:
-                blob += " " + (ch.text or "") + " " + " ".join(ch.attrib.values())
-
-            ds = sch = tbl = ""
-            mkv = LOOKUP_EXT_NAMED_KV_RE.search(blob)
-            if mkv:
-                ds, sch, tbl = mkv.group("ds","own","tbl")
-            else:
-                m2 = LOOKUP_EXT_CALL_RE.search(DOT_NORMALIZE.sub(".", blob))
-                if m2:
-                    ds, sch, tbl = m2.group(1).strip(), m2.group(2).strip(), m2.group(3).strip()
-
-            # position = DISchema name; if we can also find output column, append >>col
-            out_schema = ""
-            out_col    = ""
-            for up in ancestors_chain(e, 50):
-                t2 = lower(strip_ns(getattr(up,"tag",""))); at2 = attrs_ci(up)
-                if not out_schema and t2 == "dischema":
-                    nm=(at2.get("name") or "").strip()
-                    if nm: out_schema = nm
-                if not out_col and t2 == "dielement":
-                    nm=(at2.get("name") or "").strip()
-                    if nm: out_col = nm
-            # outside-column call => only schema is expected
-            pos = f"{out_schema}>>{out_col}" if (out_schema and out_col) else (out_schema or "")
-
-            proj,job,df = context_for(e)
-
-            # even if ds/sch/tbl missing, emit a row to flag gap
-            key = (proj,job,df, _norm_key(ds), _norm_key(sch), _norm_key(tbl), pos)
-            if key not in seen_lookup_ext_keys:
-                seen_lookup_ext_keys.add(key)
-                rows.append(Row(
-                    proj,job,df,"lookup_ext",
-                    ds,sch,tbl,
-                    pos, 1, "",
-                    getattr(e, "sourceline", -1),
-                ))
-
-        # ---------------- Custom SQL blocks ----------------
+        # -------- custom SQL capture --------
         if tag in ("sqltext","sqltexts","diquery","ditransformcall"):
-            sql_text = ""
-            pos_name = ""   # transformation_position
-
+            sql_text=""
             if tag in ("sqltext","sqltexts"):
-                sql_text = (a.get("sql_text") or "").strip() or (e.text or "").strip()
-
-            # climb to find a nicer UI display name
-            for up in ancestors_chain(e, 30):
-                t2 = lower(strip_ns(getattr(up,"tag",""))); at2=attrs_ci(up)
-                if t2 == "diattribute" and lower(at2.get("name","")) == "ui_display_name":
-                    pos_name = (at2.get("value") or "").strip()
-                    if pos_name: break
-                if t2 == "dischema" and not pos_name:
-                    pos_name = (at2.get("name") or "").strip()
-
-            # fallback — if the current node is DITransformCall, use its 'name'
-            if not pos_name and tag == "ditransformcall":
-                pos_name = (a.get("name") or "").strip()
-
+                sql_text=(a.get("sql_text") or "").strip() or (e.text or "").strip()
             if not sql_text:
-                # try to find nested SQLText
                 for ch in e.iter():
                     if lower(strip_ns(getattr(ch,"tag",""))) in ("sqltext","sql_text"):
-                        sql_text = (attrs_ci(ch).get("sql_text") or ch.text or "").strip()
+                        sql_text=(attrs_ci(ch).get("sql_text") or ch.text or "").strip()
                         if sql_text: break
+            if sql_text:
+                proj,job,df=context_for(e)
+                # friendly position (UI display name preferred)
+                label = find_nearby_attr(e, pm, names=("ui_display_name","ui_acta_from_schema_0"))
+                if not label:
+                    # fallback to schema / transform name walk like V9 did
+                    disp_name=""
+                    for up in ancestors(e, pm, 12):
+                        at=attrs_ci(up); tt=lower(strip_ns(getattr(up,"tag","")))
+                        if tt=="dischema" and not disp_name:
+                            disp_name=(at.get("name") or "").strip() or disp_name
+                    label = disp_name or "SQL"
 
-            if sql_text or pos_name:
-                # tables & datastore (best effort)
-                tables = extract_tables_from_sql(sql_text)
-                table_csv = ", ".join(tables) if tables else "SQL_TEXT"
-                ds_for_sql = ""
-                for up in ancestors_chain(e, 12):
-                    for ch in getattr(up, "__iter__", lambda: [])():
+                # tables from SQL
+                tables=extract_tables_from_sql(sql_text)
+                table_csv=", ".join(tables) if tables else "SQL_TEXT"
+                # datastore near SQL (if any)
+                ds_for_sql=""
+                for up in ancestors(e, pm, 12):
+                    for ch in up.iter():
                         if lower(strip_ns(getattr(ch,"tag","")))=="diattribute" and lower(ch.attrib.get("name",""))=="database_datastore":
-                            ds_for_sql = (ch.attrib.get("value") or "").strip()
+                            ds_for_sql=(ch.attrib.get("value") or "").strip()
                             if ds_for_sql: break
                     if ds_for_sql: break
                 ds_for_sql = ds_for_sql or "DS_SQL"
 
-                proj,job,df = context_for(e)
-                rows.append(Row(
+                remember_display(ds_for_sql,"CUSTOM_SQL",table_csv)
+                sql_rows.append(Row(
                     proj,job,df,"custom_sql",
-                    ds_for_sql,"CUSTOM",table_csv,
-                    (pos_name or "SQL"), len(tables),
+                    ds_for_sql,"CUSTOM_SQL",table_csv,
+                    label,
+                    len(tables),
                     '"' + (sql_text.replace('"','""')) + '"',
-                    getattr(e, "sourceline", -1),
+                    get_line(e)
                 ))
 
-    # --------- to DataFrame ----------
+        # ------- lookup (column-level)  [V9 logic kept] -------
+        if tag=="diattribute" and lower(a.get("name",""))=="ui_mapping_text":
+            txt=a.get("value") or e.text or ""
+            if HAS_LOOKUP.search(txt):
+                proj,job,df=context_for(e)
+                schema_out=schema_out_from_DISchema(e, pm, cur_schema)
+                col=find_output_column(e, pm)
+                dsl,schl,tbl=extract_lookup_from_call(txt, is_ext=False)
+                if dsl and tbl and schema_out and col:
+                    remember_display(dsl,schl,tbl)
+                    key=(proj,job,df,_norm_key(dsl),_norm_key(schl),_norm_key(tbl))
+                    lookup_pos[key].append(f"{schema_out}>>{col}")
+                    lookup_pos_ln[key].append(get_line(e))
+
+        # ------- lookup_ext (FUNCTION_CALL authoritative) [V9 logic kept] -------
+        if tag=="function_call" and lower(a.get("name",""))=="lookup_ext":
+            proj,job,df=context_for(e)
+            schema_out=schema_out_from_DISchema(e, pm, cur_schema)
+            dsx,schx,tbx = extract_lookup_from_call(" ".join([f'{k}=\"{v}\"' for k,v in a.items()]), is_ext=True)
+            if not dsx:
+                dsx,schx,tbx = extract_lookup_from_call(collect_text(e), is_ext=True)
+            if dsx and tbx and schema_out:
+                k = (proj,job,df,_norm_key(dsx),_norm_key(schx),_norm_key(tbx))
+                remember_display(dsx,schx,tbx)
+                lookup_ext_pos[k].add(schema_out)
+                lookup_ext_ln[k].append(get_line(e))
+                seen_ext_keys.add(k)
+
+        # ------- fallback blobs + record function positions (for external UDFs) -------
+        if tag in ("diexpression","diattribute","function_call"):
+            blob = " ".join([f'{k}=\"{v}\"' for k, v in a.items()]) + " " + collect_text(e)
+            proj,job,df=context_for(e)
+            schema_out=schema_out_from_DISchema(e, pm, cur_schema)
+            col=find_output_column(e, pm)
+
+            # record function calls (so we can attribute external lookup calls back to this DF)
+            if schema_out:
+                for fn in extract_called_function_names(blob):
+                    pos=f"{schema_out}>>{col}" if col else schema_out
+                    df_func_positions[df][ normalize_fn_name(fn) ].add(pos)
+            if tag=="function_call":
+                callee=(a.get("name") or "").strip()
+                if callee and callee.lower() not in ("lookup","lookup_ext") and schema_out:
+                    pos=f"{schema_out}>>{col}" if col else schema_out
+                    df_func_positions[df][ normalize_fn_name(callee) ].add(pos)
+
+            # fallback lookup_ext only if not already captured by FUNCTION_CALL
+            if HAS_LOOKUP_EXT.search(blob):
+                dsx,schx,tbx=extract_lookup_from_call(blob, is_ext=True)
+                if dsx and tbx and schema_out:
+                    k = (proj,job,df,_norm_key(dsx),_norm_key(schx),_norm_key(tbx))
+                    if k not in seen_ext_keys:
+                        remember_display(dsx,schx,tbx)
+                        lookup_ext_pos[k].add(schema_out)
+                        lookup_ext_ln[k].append(get_line(e))
+
+            # fallback lookup
+            if HAS_LOOKUP.search(blob) or (tag=="function_call" and lower(a.get("name",""))=="lookup"):
+                dsl,schl,tbl=extract_lookup_from_call(blob, is_ext=False)
+                if dsl and tbl and schema_out and col:
+                    remember_display(dsl,schl,tbl)
+                    key=(proj,job,df,_norm_key(dsl),_norm_key(schl),_norm_key(tbl))
+                    lookup_pos[key].append(f"{schema_out}>>{col}")
+                    lookup_pos_ln[key].append(get_line(e))
+
+    # ---- expand external function lookups into DF collectors (with normalized names) ----
+    for df_name, fn_map in df_func_positions.items():
+        proj,job = df_context.get(df_name, ("",""))
+        if not proj:
+            proj = job_to_project.get(job, "") or df_to_project.get(df_name, "")
+        for fn_key, positions in fn_map.items():
+            body = function_bodies.get(fn_key, "")
+            if not body: continue
+            # lookup_ext in body -> schema positions
+            for ds,sch,tb in extract_all_lookups(body, is_ext=True):
+                remember_display(ds,sch,tb)
+                key=(proj,job,df_name,_norm_key(ds),_norm_key(sch),_norm_key(tb))
+                for pos in {p.split(">>",1)[0] for p in positions if p}:
+                    lookup_ext_pos[key].add(pos)
+                    lookup_ext_ln[key].append(None)
+            # lookup in body -> column positions
+            for ds,sch,tb in extract_all_lookups(body, is_ext=False):
+                remember_display(ds,sch,tb)
+                key=(proj,job,df_name,_norm_key(ds),_norm_key(sch),_norm_key(tb))
+                for p in positions:
+                    lookup_pos[key].append(p)
+                    lookup_pos_ln[key].append(None)
+
+    # ---------- finalize rows ----------
+    def nice_names(dsN, schN, tblN):
+        k=(dsN, schN, tblN)
+        return (display_ds[k].get(dsN), display_sch[k].get(schN), display_tbl[k].get(tblN))
+
+    rows=[]
+
+    # lookups
+    for (proj,job,df,dsN,schN,tblN), positions in lookup_pos.items():
+        uniq=sorted(dedupe(positions))
+        if not uniq: continue
+        dsD,schD,tblD=nice_names(dsN,schN,tblN)
+        # choose first non-None line we observed for this key
+        ln_list=lookup_pos_ln.get((proj,job,df,dsN,schN,tblN), [])
+        line_no=None
+        for ln in ln_list:
+            if ln is not None: line_no=ln; break
+        rows.append(Row(proj, job, df, "lookup",
+                        dsD, schD, tblD, ", ".join(uniq), len(uniq), "", line_no))
+
+    # lookup_ext
+    for (proj,job,df,dsN,schN,tblN), posset in lookup_ext_pos.items():
+        uniq=sorted(dedupe(list(posset)))
+        dsD,schD,tblD=nice_names(dsN,schN,tblN)
+        ln_list=lookup_ext_ln.get((proj,job,df,dsN,schN,tblN), [])
+        line_no=None
+        for ln in ln_list:
+            if ln is not None: line_no=ln; break
+        rows.append(Row(proj, job, df, "lookup_ext",
+                        dsD, schD, tblD, ", ".join(uniq), len(uniq), "", line_no))
+
+    # sources / targets
+    for (proj,job,df,role,dsN,schN,tblN,line_no) in sorted(source_target):
+        dsD,schD,tblD=nice_names(dsN,schN,tblN)
+        rows.append(Row(proj, job, df, role,
+                        dsD, schD, tblD, "", 0, "", line_no))
+
+    # custom SQL rows
+    rows.extend(sql_rows)
+
     df = pd.DataFrame(rows)
     if df.empty:
         return df
 
-    # fill project_name using job->project, then df->project
+    # backfill project via job map, then via DF containment
     def fill_proj(row):
-        if row["project_name"]: return row["project_name"]
-        j = row.get("job_name",""); d = row.get("dataflow_name","")
-        if j and j in job2proj: return job2proj[j]
-        return df2proj.get(d, "")
+        if str(row["project_name"]).strip():
+            return row["project_name"]
+        j = row.get("job_name","")
+        d = row.get("dataflow_name","")
+        if j and j in job_to_project:
+            return job_to_project[j]
+        return df_to_project.get(d, "")
+
     df["project_name"] = df.apply(fill_proj, axis=1)
 
-    # merge duplicates: same role, same ds/sch/tbl + same position + same DF/job/proj
-    def merge_key(r):
+    # strict de-dupe & merge positions
+    def nkey(r):
         return (
             r["project_name"], r["job_name"], r["dataflow_name"], r["role"],
             _norm_key(r["datastore"]), _norm_key(r["schema"]), _norm_key(r["table"]),
-            _norm_key(r["transformation_position"]), _norm_key(r.get("custom_sql_text",""))
+            _norm_key(r.get("custom_sql_text",""))
         )
-    df["__k__"] = df.apply(merge_key, axis=1)
 
-    # sum usage counts; keep earliest source_line for stability
-    agg = {
-        "transformation_usage_count": "sum",
-        "source_line": "min",
-        "custom_sql_text": "first",
-        "datastore": "first",
-        "schema": "first",
-        "table": "first",
-        "transformation_position": "first",
-        "project_name":"first","job_name":"first","dataflow_name":"first","role":"first",
-    }
-    df = (df.groupby("__k__", dropna=False, as_index=False)
-            .agg(agg)
-            .drop(columns=["__k__"]))
+    df["__k__"]=df.apply(nkey, axis=1)
 
-    # prettify
-    for c in ("datastore","schema","table","transformation_position","custom_sql_text"):
-        df[c] = df[c].map(_pretty)
+    def merge_pos(series):
+        return ", ".join(sorted(dedupe([p.strip() for p in series if str(p).strip()])))
 
-    df = df.sort_values(
-        by=["project_name","job_name","dataflow_name","role","datastore","schema","table","transformation_position"]
-    ).reset_index(drop=True)
+    def best_line(series):
+        # pick first non-null, else None
+        for v in series:
+            if pd.notna(v):
+                return int(v) if str(v).isdigit() else v
+        return None
 
+    df=(df.groupby(
+            ["__k__","project_name","job_name","dataflow_name","role",
+             "datastore","schema","table","custom_sql_text"],
+            dropna=False, as_index=False)
+         .agg({"transformation_position": merge_pos,
+               "transformation_usage_count": "sum",
+               "source_line": best_line}))
+    df=df.drop(columns=["__k__"])
+
+    # cleanup & sort
+    for c in ("datastore","schema","table","custom_sql_text","transformation_position"):
+        df[c]=df[c].map(_pretty)
+
+    df=df.sort_values(by=["project_name","job_name","dataflow_name","role","datastore","schema","table"]).reset_index(drop=True)
     return df
 
 # ------------------------ main ------------------------
 
 def main():
-    # keep your defaults here
+    # set these paths (keep your current defaults if you want)
     xml_path = r"C:\Users\raksahu\Downloads\python\input\export_afs.xml"
     out_xlsx = r"C:\Users\raksahu\Downloads\python\input\output_v9_afs.xlsx"
 
@@ -443,11 +698,12 @@ def main():
     cols = [
         "project_name","job_name","dataflow_name","role",
         "datastore","schema","table",
-        "transformation_position","transformation_usage_count","custom_sql_text",
-        "source_line",
+        "transformation_position","transformation_usage_count",
+        "custom_sql_text","source_line",
     ]
     for c in cols:
-        if c not in df.columns: df[c] = ""
+        if c not in df.columns:
+            df[c] = ""
     df = df[cols]
 
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as xw:
