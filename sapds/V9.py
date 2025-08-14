@@ -129,6 +129,7 @@ def _valid_triplet(ds, sch, tbl)->bool:
 # ------------------------ function name normalization ------------------------
 
 def normalize_fn_name(name: str) -> str:
+    """Strip namespace/prefixes like Project::Func, pkg.Func, folder/Func; then canon."""
     if not name: return ""
     s = str(name).strip()
     for sep in ("::", "/", "."):
@@ -139,6 +140,7 @@ def normalize_fn_name(name: str) -> str:
 # ------------------------ lookup extractors ------------------------
 
 def extract_lookup_from_call(text: str, is_ext: bool = False):
+    """Return (datastore, owner/schema, table) or ('','','')."""
     if not text: return ("","","")
     t = DOT_NORMALIZE.sub(".", text)
 
@@ -160,6 +162,8 @@ def extract_lookup_from_call(text: str, is_ext: bool = False):
         return m2.group(1).strip(), m2.group(2).strip(), m2.group(3).strip()
 
     return ("","","")
+
+# -------- function-discovery (for external UDFs that call lookups) --------
 
 FUNC_NAME_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.I)
 
@@ -218,6 +222,7 @@ def collect_df_names(root):
     return out
 
 def build_job_to_project_map(root):
+    """Job -> Project via <DIProject><DIJobRef name=.../> blocks (multi-project exports)."""
     j2p={}
     for p in root.iter():
         if lower(strip_ns(getattr(p,"tag",""))) not in PROJECT_TAGS:
@@ -231,6 +236,7 @@ def build_job_to_project_map(root):
     return j2p
 
 def build_df_project_map(root):
+    """DF -> Project by containment (fallback to single-project)."""
     df_names = collect_df_names(root)
     df_proj={}
     projects=[]
@@ -290,7 +296,12 @@ def extract_tables_from_sql(sql_text: str):
             tables.append(parts[-1])
     return dedupe(tables)
 
-# ------------------------ main parser (V8 with lookup_ext fix) ------------------------
+def quote_sql(s: str) -> str:
+    s=(s or "").strip()
+    s=s.replace('"', r'\"')
+    return f"\"{s}\"" if s else ""
+
+# ------------------------ main parser (v8 + lookup_ext-only-from-FUNCTION_CALL) ------------------------
 
 Record = namedtuple(
     "Record",
@@ -313,8 +324,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
     function_bodies = {}
     FUNCTION_DEF_TAGS = {
         "dicustomfunction","difunction","function","diprocedure",
-        "userfunction","diuserfunction","diuserdefinedfunction","scriptfunction",
-        "discriptfunction"
+        "userfunction","diuserfunction","diuserdefinedfunction","scriptfunction","discriptfunction"
     }
     for node in root.iter():
         tag  = lower(strip_ns(getattr(node,"tag","")))
@@ -429,9 +439,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         disp_name=(at.get("name") or "").strip() or disp_name
 
                 # tables from SQL
-                def _tables_from_sql(s):  # reuse helper but keep v8 spirit
-                    return extract_tables_from_sql(s)
-                tables=_tables_from_sql(sql_text)
+                tables=extract_tables_from_sql(sql_text)
                 table_csv=", ".join(tables) if tables else "SQL_TEXT"
                 # datastore near SQL (if any)
                 ds_for_sql=""
@@ -444,17 +452,15 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 ds_for_sql = ds_for_sql or "DS_SQL"
 
                 remember_display(ds_for_sql,"CUSTOM_SQL",table_csv)
-                # quote SQL safely
-                sql_quoted = '"' + (sql_text.replace('"','""')) + '"'
                 sql_rows.append((
                     proj,job,df,"custom_sql",
                     ds_for_sql,"CUSTOM_SQL",table_csv,
                     disp_name or "SQL",
                     len(tables),
-                    sql_quoted,
+                    '"' + (sql_text.replace('"','""')) + '"',
                 ))
 
-        # ------- lookup (column-level)  [unchanged from v8] -------
+        # ------- lookup (column-level)  [v8 behavior] -------
         if tag=="diattribute" and lower(a.get("name",""))=="ui_mapping_text":
             txt=a.get("value") or e.text or ""
             if HAS_LOOKUP.search(txt):
@@ -471,7 +477,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         if tag=="function_call" and lower(a.get("name",""))=="lookup_ext":
             proj,job,df=context_for(e)
             schema_out=schema_out_from_DISchema(e, pm, cur_schema)
-            # prefer named KV on the FUNCTION_CALL tag; then fall back to children text
+            # read from attributes first, then inner
             kv_blob = " ".join([f'{k}="{v}"' for k,v in e.attrib.items()])
             dsx,schx,tbx = extract_lookup_from_call(kv_blob, is_ext=True)
             if not dsx:
@@ -480,17 +486,16 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 k = (proj,job,df,_norm_key(dsx),_norm_key(schx),_norm_key(tbx))
                 remember_display(dsx,schx,tbx)
                 lookup_ext_pos[k].add(schema_out)
-                # record that we captured this via FUNCTION_CALL so it won't be duplicated elsewhere
                 seen_ext_keys.add(k)
 
-        # ------- record function positions for external UDFs (unchanged) -------
+        # ------- generic section: only record positions & plain lookup fallback -------
         if tag in ("diexpression","diattribute","function_call"):
             blob = " ".join([f'{k}="{v}"' for k, v in e.attrib.items()]) + " " + collect_text(e)
             proj,job,df=context_for(e)
             schema_out=schema_out_from_DISchema(e, pm, cur_schema)
             col=find_output_column(e, pm)
 
-            # record function calls so we can attribute external lookups back to this DF
+            # record function calls for external UDFs (so we can attribute body lookups to this DF)
             if schema_out:
                 for fn in extract_called_function_names(blob):
                     pos=f"{schema_out}>>{col}" if col else schema_out
@@ -501,9 +506,17 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                     pos=f"{schema_out}>>{col}" if col else schema_out
                     df_func_positions[df][ normalize_fn_name(callee) ].add(pos)
 
-        # NOTE: No fallback parsing for lookup_ext from DIExpression anymore (removed to avoid duplicates)
+            # NOTE: no lookup_ext fallback here (prevents duplicates)
 
-    # ---- expand external function lookups into DF collectors (with normalized names) ----
+            # plain lookup fallback stays
+            if HAS_LOOKUP.search(blob) or (tag=="function_call" and lower(a.get("name",""))=="lookup"):
+                dsl,schl,tbl=extract_lookup_from_call(blob, is_ext=False)
+                if dsl and tbl and schema_out and col:
+                    remember_display(dsl,schl,tbl)
+                    key=(proj,job,df,_norm_key(dsl),_norm_key(schl),_norm_key(tbl))
+                    lookup_pos[key].append(f"{schema_out}>>{col}")
+
+    # ---- expand external function lookups into DF collectors ----
     for df_name, fn_map in df_func_positions.items():
         proj,job = df_context.get(df_name, ("",""))
         if not proj:
@@ -612,8 +625,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 # ------------------------ main ------------------------
 
 def main():
-    # set these paths (keep your current defaults if you want)
-    xml_path = r"C:\Users\raksahu\Downloads\python\input\export_df.xml"
+    # update these to your paths if needed
+    xml_path = r"C:\Users\raksahu\Downloads\python\input\export_afs.xml"
     out_xlsx = r"C:\Users\raksahu\Downloads\python\input\output_v9_afs.xlsx"
 
     df = parse_single_xml(xml_path)
