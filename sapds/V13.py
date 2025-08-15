@@ -11,7 +11,9 @@ from lxml import etree as ET
 def strip_ns(tag): return re.sub(r"^\{.*\}", "", tag) if isinstance(tag, str) else ""
 def lower(s): return (s or "").strip().lower()
 def attrs_ci(e): return {k.lower(): (v or "") for k, v in (getattr(e, "attrib", {}) or {}).items()}
-def line_no(node): return getattr(node, "sourceline", -1) or -1
+def line_no(node):
+    ln = getattr(node, "sourceline", None)
+    return int(ln) if isinstance(ln, int) else -1
 def build_parent_map(root): return {c: p for p in root.iter() for c in p}
 
 def ancestors(e, pm, lim=200):
@@ -129,7 +131,7 @@ def build_df_project_map(root):
                 if dn: df_proj.setdefault(dn, pnm)
     if len(projects)==1:
         only=projects[0][0]
-        for dn in df_names: df_proj.setdefault(dn, only)
+        for dn in collect_df_names(root): df_proj.setdefault(dn, only)
     return df_proj
 
 def build_df_job_map(root):
@@ -160,7 +162,7 @@ def build_df_job_map(root):
         cur=cs; src_kind=src_name=None
         for _ in range(200):
             cur=pm.get(cur)
-            if not cur: break
+            if cur is None: break
             t=lower(strip_ns(cur.tag))
             if t in JOB_TAGS: src_kind,src_name="job",_job_name_from_node(cur); break
             if t in WF_TAGS:  src_kind,src_name="wf",(cur.attrib.get("name") or cur.attrib.get("displayName") or ""); break
@@ -240,53 +242,6 @@ def in_dataflow(e, pm):
             return True
     return False
 
-# ---- helper: robust SQL position resolver (UI display name preferred) ----
-def derive_sql_position(e, pm):
-    """
-    Prefer UI display name near the SQL node; then DISchema name;
-    finally any nearby ancestor's displayName/name. No forced 'SQL' fallback.
-    """
-    schema_node = None
-    for a in ancestors(e, pm, 100):
-        if lower(strip_ns(getattr(a, "tag", ""))) == "dischema":
-            schema_node = a
-            break
-
-    # nearest UI display name in a short walk upwards
-    for up in ancestors(e, pm, 12):
-        if lower(strip_ns(getattr(up, "tag", ""))) == "diattribute":
-            at = attrs_ci(up)
-            if lower(at.get("name", "")) in ("ui_display_name","ui_acta_from_schema_0"):
-                v = (at.get("value") or "").strip()
-                if v:
-                    return v
-
-    # search inside schema subtree (common place)
-    if schema_node is not None:
-        for ch in schema_node.iter():
-            if lower(strip_ns(getattr(ch, "tag", ""))) == "diattribute":
-                at = attrs_ci(ch)
-                if lower(at.get("name", "")) in ("ui_display_name","ui_acta_from_schema_0"):
-                    v = (at.get("value") or "").strip()
-                    if v:
-                        return v
-
-    # fallback: schema's own name/displayName
-    if schema_node is not None:
-        at = attrs_ci(schema_node)
-        nm = (at.get("name") or at.get("displayname") or "").strip()
-        if nm:
-            return nm
-
-    # last chance: nearby ancestor with a displayName/name
-    for up in ancestors(e, pm, 20):
-        at = attrs_ci(up)
-        nm = (at.get("displayname") or at.get("name") or "").strip()
-        if nm:
-            return nm
-
-    return ""
-
 # -------------------- SQL helpers --------------------
 
 SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
@@ -326,15 +281,15 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         k=(_norm_key(ds), _norm_key(sch), _norm_key(tbl))
         display_ds[k].add(ds); display_sch[k].add(sch); display_tbl[k].add(tbl)
 
-    source_target  = set()
+    # NOTE: now include source_line with each collected item
+    source_target  = set()  # (proj,job,df,role,dsN,schN,tblN, line)
     sql_rows       = []
     lookup_pos     = defaultdict(lambda: defaultdict(set))   # key -> pos -> {call_lines}
     lookup_ext_pos = defaultdict(lambda: defaultdict(set))   # key -> pos -> {call_lines}
     missing_lookup = []
 
     df_context        = {}  # df -> (proj, job)
-    # df -> canon(func) -> set of (pos, call_line)
-    df_func_callsites = defaultdict(lambda: defaultdict(set))
+    df_func_callsites = defaultdict(lambda: defaultdict(set))  # df -> canon(func) -> {(pos, call_line)}
 
     cur_proj = cur_job = cur_df = cur_schema = ""
     last_job = ""
@@ -396,19 +351,19 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         if tag=="dischema":
             cur_schema=(a.get("name") or a.get("displayname") or cur_schema).strip()
 
-        # 1) DB sources/targets (only if inside DF)
+        # 1) DB sources/targets (only if inside DF) — now with source_line
         if tag in ("didatabasetablesource","didatabasetabletarget") and in_dataflow(e, pm):
+            proj,job,df=context_for(e)
+            role="source" if "source" in tag else "target"
             ds =(a.get("datastorename") or a.get("datastore") or "").strip()
             sch=(a.get("ownername") or a.get("schema") or a.get("owner") or "").strip()
             tbl=(a.get("tablename") or a.get("table") or "").strip()
             if ds and tbl:
                 remember_display(ds,sch,tbl)
-                proj,job,df=context_for(e)
-                role="source" if "source" in tag else "target"
-                key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
+                key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e))
                 source_target.add(key)
 
-        # 2) FILE sources/targets (only if inside DF)
+        # 2) FILE sources/targets (only if inside DF) — now with source_line
         if tag in ("difilesource","difiletarget") and in_dataflow(e, pm):
             proj,job,df=context_for(e)
             role="source" if "source" in tag else "target"
@@ -418,10 +373,10 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             sch=fmt or "FILE"
             tbl=fname or "FILE_OBJECT"
             remember_display(ds,sch,tbl)
-            key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
+            key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e))
             source_target.add(key)
 
-        # 3) CUSTOM SQL (only if inside DF) — transformation_position uses FULL UI display name
+        # 3) CUSTOM SQL (only if inside DF) — transformation_position uses UI display name / DISchema only
         if tag in ("sqltext","sqltexts","diquery","ditransformcall") and in_dataflow(e, pm):
             sql_text=""
             if tag in ("sqltext","sqltexts"):
@@ -433,77 +388,32 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         if sql_text: break
             if sql_text:
                 proj,job,df=context_for(e)
-
-                # >>>>>>> ONLY CHANGE: get full UI display name for position <<<<<<<
-                disp_name = ""
-                # try closest DIAttribute ui_display_name / ui_acta_from_schema_0
+                disp_name=""
                 for up in ancestors(e, pm, 12):
                     at=attrs_ci(up); tt=lower(strip_ns(getattr(up,"tag","")))
                     if tt=="diattribute" and lower(at.get("name","")) in ("ui_display_name","ui_acta_from_schema_0"):
-                        v=(at.get("value") or "").strip()
-                        if v:
-                            disp_name = v
-                            break
-                # if still blank, search within the nearest DISchema subtree
-                if not disp_name:
-                    schema_node=None
-                    for a_up in ancestors(e, pm, 100):
-                        if lower(strip_ns(getattr(a_up,"tag","")))=="dischema":
-                            schema_node=a_up
-                            break
-                    if schema_node is not None:
-                        for ch in schema_node.iter():
-                            if lower(strip_ns(getattr(ch,"tag","")))=="diattribute":
-                                at=attrs_ci(ch)
-                                if lower(at.get("name","")) in ("ui_display_name","ui_acta_from_schema_0"):
-                                    v=(at.get("value") or "").strip()
-                                    if v:
-                                        disp_name=v
-                                        break
-                # fallback to schema name/displayName, then any nearby named ancestor
-                if not disp_name:
-                    for a_up in ancestors(e, pm, 100):
-                        if lower(strip_ns(getattr(a_up,"tag","")))=="dischema":
-                            at=attrs_ci(a_up)
-                            nm=(at.get("name") or at.get("displayname") or "").strip()
-                            if nm:
-                                disp_name=nm
-                                break
-                if not disp_name:
-                    for up in ancestors(e, pm, 20):
-                        at=attrs_ci(up)
-                        nm=(at.get("displayname") or at.get("name") or "").strip()
-                        if nm:
-                            disp_name=nm
-                            break
-                # >>>>>>> END CHANGE <<<<<<<
-
+                        disp_name=at.get("value","").strip() or disp_name
+                    if tt=="dischema" and not disp_name:
+                        disp_name=(at.get("name") or "").strip() or disp_name
                 tables=extract_tables_from_sql(sql_text)
                 table_csv=", ".join(tables) if tables else "SQL_TEXT"
-                ds_for_sql=""
-                for up in ancestors(e, pm, 12):
-                    for ch in up.iter():
-                        if lower(strip_ns(getattr(ch,"tag","")))=="diattribute" and lower(ch.attrib.get("name",""))=="database_datastore":
-                            ds_for_sql=(ch.attrib.get("value") or "").strip()
-                            if ds_for_sql: break
-                    if ds_for_sql: break
-                ds_for_sql = ds_for_sql or "DS_SQL"
+                ds_for_sql="DS_SQL"
                 remember_display(ds_for_sql,"CUSTOM_SQL",table_csv)
                 sql_rows.append(Record(
                     proj,job,df,"custom_sql",
                     ds_for_sql,"CUSTOM_SQL",table_csv,
-                    disp_name, len(tables),
+                    disp_name,  # <- no fallback "SQL"
+                    len(tables),
                     '"' + (sql_text.replace('"','""')) + '"',
                     line_no(e),
                 ))
 
-        # 4) LOOKUPS — use only FUNCTION_CALL inside DF
+        # 4) LOOKUPS — FUNCTION_CALL inside DF (unchanged from V11)
         if tag=="function_call" and in_dataflow(e, pm):
             proj,job,df = context_for(e)
             an  = attrs_ci(e)
             cal = (an.get("name") or "").strip().lower()
 
-            # record external function callsites (for later attribution)
             if cal not in ("lookup","lookup_ext"):
                 schema_out = schema_out_from_DISchema(e, pm, cur_schema)
                 col        = find_output_column(e, pm)
@@ -513,7 +423,6 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                     if fn_key: df_func_callsites[df][fn_key].add((pos, line_no(e)))
                 continue
 
-            # direct lookup/lookup_ext call in DF
             schema_out = schema_out_from_DISchema(e, pm, cur_schema)
             col        = find_output_column(e, pm)
             pos        = f"{schema_out}>>{col}" if (schema_out and col) else (schema_out or "")
@@ -549,7 +458,6 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             if not payloads:  # function doesn't contain lookups; skip
                 continue
             for role, ds, sch, tbl in payloads:
-                # if DS/TBL missing, still output placeholder for each callsite
                 if not (ds and tbl):
                     for pos, ln_call in callsites:
                         missing_lookup.append(Record(
@@ -595,9 +503,10 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 
     rows.extend(missing_lookup)
 
-    for (proj,job,df,role,dsN,schN,tblN) in sorted(source_target):
+    # include source_line from source/target tuples
+    for (proj,job,df,role,dsN,schN,tblN,ln) in sorted(source_target):
         dsD,schD,tblD=nice_names(dsN,schN,tblN)
-        rows.append(Record(proj, job, df, role, dsD, schD, tblD, "", 0, "", -1))
+        rows.append(Record(proj, job, df, role, dsD, schD, tblD, "", 0, "", ln))
 
     rows.extend(sql_rows)
 
@@ -609,9 +518,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         if str(row["project_name"]).strip(): return row["project_name"]
         j = row.get("job_name",""); d = row.get("dataflow_name","")
         if j and j in job_to_project: return job_to_project[j]
-        return df_to_project.get(d, ""
-
-        )
+        return df_to_project.get(d, "")
 
     df["project_name"] = df.apply(fill_proj, axis=1)
 
@@ -645,7 +552,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 def main():
     # keep your paths here
     xml_path = r"C:\Users\raksahu\Downloads\python\input\export_afs.xml"
-    out_xlsx = r"C:\Users\raksahu\Downloads\python\input\output_v9_afs.xlsx"
+    out_xlsx = r"C:\Users\raksahu\Downloads\python\input\output_v12_afs.xlsx"
 
     df = parse_single_xml(xml_path)
 
