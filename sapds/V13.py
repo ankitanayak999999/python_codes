@@ -242,48 +242,6 @@ def in_dataflow(e, pm):
             return True
     return False
 
-# NEW: stronger SQL display-name resolver
-def derive_sql_position(e, pm):
-    """
-    Prefer the full UI display name near the SQL node; then DISchema name;
-    then any nearby ancestor display/name. Avoid generic 'SQL' fallback.
-    """
-    # check immediate ancestor attributes first
-    for up in ancestors(e, pm, 12):
-        if lower(strip_ns(getattr(up, "tag", ""))) == "diattribute":
-            at = attrs_ci(up)
-            if lower(at.get("name", "")) in ("ui_display_name", "ui_acta_from_schema_0"):
-                v = (at.get("value") or "").strip()
-                if v: return v
-
-    # search within nearest DISchema subtree
-    schema_node = None
-    for a in ancestors(e, pm, 100):
-        if lower(strip_ns(getattr(a, "tag", ""))) == "dischema":
-            schema_node = a
-            break
-
-    if schema_node is not None:
-        for ch in schema_node.iter():
-            if lower(strip_ns(getattr(ch, "tag", ""))) == "diattribute":
-                at = attrs_ci(ch)
-                if lower(at.get("name", "")) in ("ui_display_name", "ui_acta_from_schema_0"):
-                    v = (at.get("value") or "").strip()
-                    if v:
-                        return v
-        # fallback to schema node name
-        at = attrs_ci(schema_node)
-        nm = (at.get("name") or at.get("displayname") or "").strip()
-        if nm: return nm
-
-    # last-resort: any named ancestor
-    for up in ancestors(e, pm, 20):
-        at = attrs_ci(up)
-        nm = (at.get("displayname") or at.get("name") or "").strip()
-        if nm: return nm
-
-    return ""
-
 # -------------------- SQL helpers --------------------
 
 SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
@@ -418,7 +376,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e))
             source_target.add(key)
 
-        # 3) CUSTOM SQL (only if inside DF) — transformation_position uses full UI display name
+        # 3) CUSTOM SQL (inside DF)
         if tag in ("sqltext","sqltexts","diquery","ditransformcall") and in_dataflow(e, pm):
             sql_text=""
             if tag in ("sqltext","sqltexts"):
@@ -430,25 +388,43 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         if sql_text: break
             if sql_text:
                 proj,job,df=context_for(e)
-
-                # >>> Only change from v12: compute full UI display name robustly
-                disp_name = derive_sql_position(e, pm)
-                # <<<
-
+                # UI display name (or DISchema name) -> goes to SCHEMA (per your request)
+                disp_name=""
+                for up in ancestors(e, pm, 12):
+                    at=attrs_ci(up); tt=lower(strip_ns(getattr(up,"tag","")))
+                    if tt=="diattribute" and lower(at.get("name","")) in ("ui_display_name","ui_acta_from_schema_0"):
+                        disp_name=at.get("value","").strip() or disp_name
+                    if tt=="dischema" and not disp_name:
+                        disp_name=(at.get("name") or "").strip() or disp_name
+                # tables from SQL -> TABLE
                 tables=extract_tables_from_sql(sql_text)
                 table_csv=", ".join(tables) if tables else "SQL_TEXT"
-                ds_for_sql="DS_SQL"
-                remember_display(ds_for_sql,"CUSTOM_SQL",table_csv)
+                # datastore: read the real database_datastore from ancestors (fallback to DS_SQL)
+                ds_for_sql=""
+                for up in ancestors(e, pm, 12):
+                    for ch in up.iter():
+                        if lower(strip_ns(getattr(ch,"tag","")))=="diattribute" and lower(getattr(ch, "attrib", {}).get("name",""))=="database_datastore":
+                            ds_for_sql=(getattr(ch, "attrib", {}).get("value") or "").strip()
+                            if ds_for_sql: break
+                    if ds_for_sql: break
+                ds_for_sql = ds_for_sql or "DS_SQL"
+
+                # remember pretty names
+                remember_display(ds_for_sql, disp_name, table_csv)
+
+                # transformation_position must be blank for custom SQL (per your request)
                 sql_rows.append(Record(
                     proj,job,df,"custom_sql",
-                    ds_for_sql,"CUSTOM_SQL",table_csv,
-                    disp_name,
+                    ds_for_sql,           # datastore
+                    disp_name,            # schema (UI display name)
+                    table_csv,            # table (comma-separated tables)
+                    "",                   # transformation_position BLANK
                     len(tables),
                     '"' + (sql_text.replace('"','""')) + '"',
                     line_no(e),
                 ))
 
-        # 4) LOOKUPS — FUNCTION_CALL inside DF (unchanged from V12)
+        # 4) LOOKUPS — FUNCTION_CALL inside DF (unchanged from your v12)
         if tag=="function_call" and in_dataflow(e, pm):
             proj,job,df = context_for(e)
             an  = attrs_ci(e)
@@ -558,9 +534,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         if str(row["project_name"]).strip(): return row["project_name"]
         j = row.get("job_name",""); d = row.get("dataflow_name","")
         if j and j in job_to_project: return job_to_project[j]
-        return df_to_project.get(d, ""
-
-        )
+        return df_to_project.get(d, "")
 
     df["project_name"] = df.apply(fill_proj, axis=1)
 
@@ -609,14 +583,13 @@ def main():
         if c not in df.columns:
             df[c] = ""
 
-    # --- NEW: build key from the first 7 fields and keep it LAST ---
+    # --- keep your key at the end (first 7 columns) ---
     key_cols = ["project_name","job_name","dataflow_name","role","datastore","schema","table"]
     df["key"] = df[key_cols].astype(str).agg("||".join, axis=1)
 
-    # put key at the end
     export_cols = cols + ["key"]
     df = df[export_cols]
-    # ---------------------------------------------------------------
+    # ---------------------------------------------------
 
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as xw:
         df.to_excel(xw, index=False, sheet_name="lineage")
