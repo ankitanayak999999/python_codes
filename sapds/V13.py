@@ -606,8 +606,17 @@ def main():
         "custom_sql_text","source_line",
     ]
     for c in cols:
-        if c not in df.columns: df[c] = ""
-    df = df[cols]
+        if c not in df.columns:
+            df[c] = ""
+
+    # --- NEW: build key from the first 7 fields and keep it LAST ---
+    key_cols = ["project_name","job_name","dataflow_name","role","datastore","schema","table"]
+    df["key"] = df[key_cols].astype(str).agg("||".join, axis=1)
+
+    # put key at the end
+    export_cols = cols + ["key"]
+    df = df[export_cols]
+    # ---------------------------------------------------------------
 
     with pd.ExcelWriter(out_xlsx, engine="openpyxl") as xw:
         df.to_excel(xw, index=False, sheet_name="lineage")
