@@ -242,6 +242,48 @@ def in_dataflow(e, pm):
             return True
     return False
 
+# NEW: stronger SQL display-name resolver
+def derive_sql_position(e, pm):
+    """
+    Prefer the full UI display name near the SQL node; then DISchema name;
+    then any nearby ancestor display/name. Avoid generic 'SQL' fallback.
+    """
+    # check immediate ancestor attributes first
+    for up in ancestors(e, pm, 12):
+        if lower(strip_ns(getattr(up, "tag", ""))) == "diattribute":
+            at = attrs_ci(up)
+            if lower(at.get("name", "")) in ("ui_display_name", "ui_acta_from_schema_0"):
+                v = (at.get("value") or "").strip()
+                if v: return v
+
+    # search within nearest DISchema subtree
+    schema_node = None
+    for a in ancestors(e, pm, 100):
+        if lower(strip_ns(getattr(a, "tag", ""))) == "dischema":
+            schema_node = a
+            break
+
+    if schema_node is not None:
+        for ch in schema_node.iter():
+            if lower(strip_ns(getattr(ch, "tag", ""))) == "diattribute":
+                at = attrs_ci(ch)
+                if lower(at.get("name", "")) in ("ui_display_name", "ui_acta_from_schema_0"):
+                    v = (at.get("value") or "").strip()
+                    if v:
+                        return v
+        # fallback to schema node name
+        at = attrs_ci(schema_node)
+        nm = (at.get("name") or at.get("displayname") or "").strip()
+        if nm: return nm
+
+    # last-resort: any named ancestor
+    for up in ancestors(e, pm, 20):
+        at = attrs_ci(up)
+        nm = (at.get("displayname") or at.get("name") or "").strip()
+        if nm: return nm
+
+    return ""
+
 # -------------------- SQL helpers --------------------
 
 SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
@@ -376,7 +418,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e))
             source_target.add(key)
 
-        # 3) CUSTOM SQL (only if inside DF) — transformation_position uses UI display name / DISchema only
+        # 3) CUSTOM SQL (only if inside DF) — transformation_position uses full UI display name
         if tag in ("sqltext","sqltexts","diquery","ditransformcall") and in_dataflow(e, pm):
             sql_text=""
             if tag in ("sqltext","sqltexts"):
@@ -388,13 +430,11 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         if sql_text: break
             if sql_text:
                 proj,job,df=context_for(e)
-                disp_name=""
-                for up in ancestors(e, pm, 12):
-                    at=attrs_ci(up); tt=lower(strip_ns(getattr(up,"tag","")))
-                    if tt=="diattribute" and lower(at.get("name","")) in ("ui_display_name","ui_acta_from_schema_0"):
-                        disp_name=at.get("value","").strip() or disp_name
-                    if tt=="dischema" and not disp_name:
-                        disp_name=(at.get("name") or "").strip() or disp_name
+
+                # >>> Only change from v12: compute full UI display name robustly
+                disp_name = derive_sql_position(e, pm)
+                # <<<
+
                 tables=extract_tables_from_sql(sql_text)
                 table_csv=", ".join(tables) if tables else "SQL_TEXT"
                 ds_for_sql="DS_SQL"
@@ -402,13 +442,13 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 sql_rows.append(Record(
                     proj,job,df,"custom_sql",
                     ds_for_sql,"CUSTOM_SQL",table_csv,
-                    disp_name,  # <- no fallback "SQL"
+                    disp_name,
                     len(tables),
                     '"' + (sql_text.replace('"','""')) + '"',
                     line_no(e),
                 ))
 
-        # 4) LOOKUPS — FUNCTION_CALL inside DF (unchanged from V11)
+        # 4) LOOKUPS — FUNCTION_CALL inside DF (unchanged from V12)
         if tag=="function_call" and in_dataflow(e, pm):
             proj,job,df = context_for(e)
             an  = attrs_ci(e)
@@ -518,7 +558,9 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         if str(row["project_name"]).strip(): return row["project_name"]
         j = row.get("job_name",""); d = row.get("dataflow_name","")
         if j and j in job_to_project: return job_to_project[j]
-        return df_to_project.get(d, "")
+        return df_to_project.get(d, ""
+
+        )
 
     df["project_name"] = df.apply(fill_proj, axis=1)
 
