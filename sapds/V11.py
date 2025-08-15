@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# all working fine 
+#issues : line number for all rows , display SQL ui display name , warning msg error 
 
 import re
 from collections import defaultdict, namedtuple
