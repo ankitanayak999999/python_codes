@@ -6,20 +6,12 @@ from collections import defaultdict, namedtuple
 import pandas as pd
 from lxml import etree as ET
 
-# ================================================================
-# Toggle: merge all positions into one row (True) vs one row per position (False)
-# ================================================================
-MERGE_POSITIONS = False
-
-# ================================================================
-# Utilities
-# ================================================================
+# -------------------- small utils --------------------
 
 def strip_ns(tag): return re.sub(r"^\{.*\}", "", tag) if isinstance(tag, str) else ""
 def lower(s): return (s or "").strip().lower()
 def attrs_ci(e): return {k.lower(): (v or "") for k, v in (getattr(e, "attrib", {}) or {}).items()}
 def line_no(node): return getattr(node, "sourceline", -1) or -1
-
 def build_parent_map(root): return {c: p for p in root.iter() for c in p}
 
 def ancestors(e, pm, lim=200):
@@ -70,9 +62,7 @@ class NameBag:
             self.best = s
     def get(self, fallback=""): return self.best or _pretty(fallback)
 
-# ================================================================
-# Constants
-# ================================================================
+# -------------------- constants --------------------
 
 DF_TAGS       = ("didataflow","dataflow","dflow")
 JOB_TAGS      = ("dijob","dibatchjob","job","batch_job")
@@ -94,9 +84,7 @@ Record = namedtuple(
     ],
 )
 
-# ================================================================
-# Project / Job / DF mapping helpers
-# ================================================================
+# -------------------- project/job/df mapping --------------------
 
 def _job_name_from_node(job_node):
     for ch in job_node.iter():
@@ -145,7 +133,6 @@ def build_df_project_map(root):
     return df_proj
 
 def build_df_job_map(root):
-    """Map each Dataflow -> Job by following CallSteps (Job/Workflow -> Workflow/Dataflow)."""
     pm={c:p for p in root.iter() for c in p}
     df_names = collect_df_names(root)
     df_canon = {re.sub(r'[^A-Z0-9]','',n.upper()): n for n in df_names}
@@ -161,8 +148,7 @@ def build_df_job_map(root):
             nm=(n.attrib.get("name") or n.attrib.get("displayName") or "").strip()
             if nm: wfs[nm]=n
 
-    edges=defaultdict(set)  # (kind, canon_name) -> set((kind, canon_name))
-
+    edges=defaultdict(set)
     def canon(s): return re.sub(r'[^A-Z0-9]','',(s or '').upper())
     def add_edge(src_kind, src_name, dst_kind, dst_name):
         if src_name and dst_name:
@@ -170,10 +156,8 @@ def build_df_job_map(root):
 
     for cs in root.iter():
         if lower(strip_ns(getattr(cs,"tag",""))) not in CALLSTEP_TAGS: continue
-
-        # find source (job/workflow) by walking up
-        src_kind, src_name = None, None
-        cur=cs
+        # climb to find src job/wf
+        cur=cs; src_kind=src_name=None
         for _ in range(200):
             cur=pm.get(cur)
             if not cur: break
@@ -184,7 +168,6 @@ def build_df_job_map(root):
 
         a=attrs_ci(cs)
         tgt_type=(a.get("calledobjecttype") or a.get("type") or "").strip().lower()
-        # collect possible names
         names=[]
         for k in ("calledobject","name","object","target","called_object"):
             if a.get(k):
@@ -199,16 +182,15 @@ def build_df_job_map(root):
         elif tgt_type in ("dataflow","didataflow"):
             for nm in names: add_edge(src_kind,src_name,"df",nm)
         else:
-            # fallback: text contains known wf/df names
             for w in wfs.keys():
                 if canon(w) in canon(txt): add_edge(src_kind,src_name,"wf",w)
             for d in df_names:
                 if canon(d) in canon(txt): add_edge(src_kind,src_name,"df",d)
 
-    # reachability: Job -> (via wf) -> df
     df_job={}
     for j in jobs.keys():
-        start=("job", canon(j)); seen={start}; stack=[start]; reach=set()
+        start=("job", re.sub(r'[^A-Z0-9]','',j.upper()))
+        seen={start}; stack=[start]; reach=set()
         while stack:
             node=stack.pop()
             for nxt in edges.get(node,()):
@@ -225,12 +207,9 @@ def build_df_job_map(root):
     if len(jobs)==1:
         only=list(jobs.keys())[0]
         for d in df_names: df_job.setdefault(d, only)
-
     return df_job
 
-# ================================================================
-# DISchema / Element helpers (for transformation positions)
-# ================================================================
+# -------------------- helpers for positions --------------------
 
 def schema_out_from_DISchema(e, pm, fallback=""):
     best=None; join=None
@@ -255,9 +234,13 @@ def find_output_column(e, pm):
         cur=pm.get(cur)
     return ""
 
-# ================================================================
-# SQL helpers
-# ================================================================
+def in_dataflow(e, pm):
+    for a in ancestors(e, pm, 200):
+        if lower(strip_ns(getattr(a,"tag",""))) in DF_TAGS:
+            return True
+    return False
+
+# -------------------- SQL helpers --------------------
 
 SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
 
@@ -274,9 +257,7 @@ def extract_tables_from_sql(sql_text: str):
             tables.append(parts[-1])
     return dedupe(tables)
 
-# ================================================================
-# Main parser
-# ================================================================
+# -------------------- main parser --------------------
 
 def parse_single_xml(xml_path: str) -> pd.DataFrame:
     parser = ET.XMLParser(huge_tree=True, recover=True)
@@ -286,9 +267,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 
     job_to_project = build_job_to_project_map(root)
     df_to_project  = build_df_project_map(root)
-    df_to_job      = build_df_job_map(root)  # infer job for DFs via CallSteps
+    df_to_job      = build_df_job_map(root)
 
-    # friendly-name caches
     display_ds  = defaultdict(NameBag)
     display_sch = defaultdict(NameBag)
     display_tbl = defaultdict(NameBag)
@@ -299,16 +279,15 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         k=(_norm_key(ds), _norm_key(sch), _norm_key(tbl))
         display_ds[k].add(ds); display_sch[k].add(sch); display_tbl[k].add(tbl)
 
-    # collectors ---------------------------------------------------
-    source_target  = set()                            # (proj, job, df, role, dsN, schN, tblN)
-    sql_rows       = []                               # list of Record tuples
-    lookup_pos     = defaultdict(lambda: defaultdict(set))   # key -> pos -> set(lines)
-    lookup_ext_pos = defaultdict(lambda: defaultdict(set))   # key -> pos -> set(lines)
-    missing_lookup = []                               # rows with missing DS/Owner/Table
+    source_target  = set()
+    sql_rows       = []
+    lookup_pos     = defaultdict(lambda: defaultdict(set))   # key -> pos -> {call_lines}
+    lookup_ext_pos = defaultdict(lambda: defaultdict(set))   # key -> pos -> {call_lines}
+    missing_lookup = []
 
-    df_context        = {}  # df -> (proj,job)
-    df_func_positions = defaultdict(lambda: defaultdict(set))   # df -> canon(fn) -> {positions}
-    df_func_callsites = defaultdict(lambda: defaultdict(list))  # df -> canon(fn) -> [call-site lines]
+    df_context        = {}  # df -> (proj, job)
+    # df -> canon(func) -> set of (pos, call_line)
+    df_func_callsites = defaultdict(lambda: defaultdict(set))
 
     cur_proj = cur_job = cur_df = cur_schema = ""
     last_job = ""
@@ -323,14 +302,11 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             if not proj and t in PROJECT_TAGS: proj = nm or proj
             if t in JOB_TAGS and not job: job = _job_name_from_node(a) or job
         df  = df or cur_df
-        # prefer mapping from CallSteps when ancestor job not present
         job = job or df_to_job.get(df, None) or (last_job if not cur_job else cur_job)
-        # project from job map or DF containment
         proj = job_to_project.get(job, proj or df_to_project.get(df, cur_proj))
         if df and (df not in df_context): df_context[df]=(proj or "", job or "")
         return proj or "", job or "", df or ""
 
-    # -------- scan function definitions for their own FUNCTION_CALL lookups
     def normalize_fn_name(name: str) -> str:
         if not name: return ""
         s = name.strip()
@@ -338,7 +314,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             if sep in s: s=s.split(sep)[-1]
         return re.sub(r'[^A-Z0-9]','',s.upper())
 
-    fn_lookup_calls = defaultdict(list)   # canon(func) -> list of (role, ds, sch, tbl, ln)
+    # collect lookup calls inside function definitions (for later attribution)
+    fn_lookup_calls = defaultdict(list)   # canon(func) -> list of (role, ds, sch, tbl)
     for node in root.iter():
         t=lower(strip_ns(getattr(node,"tag","")))
         if t in FUNCTION_DEF_TAGS:
@@ -354,16 +331,13 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 ds   = an.get("tabledatastore") or ""
                 sch  = an.get("tableowner") or ""
                 tbl  = an.get("tablename") or ""
-                ln   = line_no(fc)
-                fn_lookup_calls[key].append((role, ds, sch, tbl, ln))
+                fn_lookup_calls[key].append((role, ds, sch, tbl))
 
-    # -------- walk XML once (organized blocks)
-
+    # walk xml (only DF-resident things are recorded)
     for e in root.iter():
         if not isinstance(e.tag, str): continue
         tag=lower(strip_ns(e.tag)); a=attrs_ci(e)
 
-        # ---- context tracking
         if tag in PROJECT_TAGS: cur_proj=(a.get("name") or a.get("displayname") or cur_proj).strip()
         if tag in DF_TAGS:
             cur_df  =(a.get("name") or a.get("displayname") or cur_df).strip()
@@ -375,8 +349,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         if tag=="dischema":
             cur_schema=(a.get("name") or a.get("displayname") or cur_schema).strip()
 
-        # ---- 1) SOURCES / TARGETS (DB)
-        if tag in ("didatabasetablesource","didatabasetabletarget"):
+        # 1) DB sources/targets (only if inside DF)
+        if tag in ("didatabasetablesource","didatabasetabletarget") and in_dataflow(e, pm):
             ds =(a.get("datastorename") or a.get("datastore") or "").strip()
             sch=(a.get("ownername") or a.get("schema") or a.get("owner") or "").strip()
             tbl=(a.get("tablename") or a.get("table") or "").strip()
@@ -387,8 +361,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
                 source_target.add(key)
 
-        # ---- 2) SOURCES / TARGETS (FILE)
-        if tag in ("difilesource","difiletarget"):
+        # 2) FILE sources/targets (only if inside DF)
+        if tag in ("difilesource","difiletarget") and in_dataflow(e, pm):
             proj,job,df=context_for(e)
             role="source" if "source" in tag else "target"
             fmt=(a.get("formatname") or "").strip()
@@ -400,8 +374,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl))
             source_target.add(key)
 
-        # ---- 3) CUSTOM SQL (same as V8/V9)
-        if tag in ("sqltext","sqltexts","diquery","ditransformcall"):
+        # 3) CUSTOM SQL (only if inside DF)
+        if tag in ("sqltext","sqltexts","diquery","ditransformcall") and in_dataflow(e, pm):
             sql_text=""
             if tag in ("sqltext","sqltexts"):
                 sql_text=(a.get("sql_text") or "").strip() or (e.text or "").strip()
@@ -412,7 +386,6 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         if sql_text: break
             if sql_text:
                 proj,job,df=context_for(e)
-                # position name (prefer UI display)
                 disp_name=""
                 for up in ancestors(e, pm, 12):
                     at=attrs_ci(up); tt=lower(strip_ns(getattr(up,"tag","")))
@@ -420,7 +393,6 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         disp_name=at.get("value","").strip() or disp_name
                     if tt=="dischema" and not disp_name:
                         disp_name=(at.get("name") or "").strip() or disp_name
-                # tables & datastore
                 tables=extract_tables_from_sql(sql_text)
                 table_csv=", ".join(tables) if tables else "SQL_TEXT"
                 ds_for_sql=""
@@ -440,42 +412,33 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                     line_no(e),
                 ))
 
-        # ---- 4) LOOKUPS FROM <FUNCTION_CALL> ONLY
-        if tag=="function_call":
+        # 4) LOOKUPS — use only FUNCTION_CALL inside DF
+        if tag=="function_call" and in_dataflow(e, pm):
             proj,job,df = context_for(e)
             an  = attrs_ci(e)
             cal = (an.get("name") or "").strip().lower()
 
-            # record external function callsites for later expansion
+            # record external function callsites (for later attribution)
             if cal not in ("lookup","lookup_ext"):
                 schema_out = schema_out_from_DISchema(e, pm, cur_schema)
                 col        = find_output_column(e, pm)
                 if schema_out:
                     pos = f"{schema_out}>>{col}" if col else schema_out
-                    # canon function name
-                    fn_name = (an.get("name") or "")
-                    for sep in ("::","/","."):
-                        if sep in fn_name: fn_name = fn_name.split(sep)[-1]
-                    fn_key = re.sub(r'[^A-Z0-9]','',fn_name.upper())
-                    if fn_key:
-                        df_func_positions[df][fn_key].add(pos)
-                        df_func_callsites[df][fn_key].append(line_no(e))
+                    fn_key = normalize_fn_name(an.get("name") or "")
+                    if fn_key: df_func_callsites[df][fn_key].add((pos, line_no(e)))
                 continue
 
-            # direct lookup / lookup_ext call in DF
+            # direct lookup/lookup_ext call in DF
             schema_out = schema_out_from_DISchema(e, pm, cur_schema)
             col        = find_output_column(e, pm)
             pos        = f"{schema_out}>>{col}" if (schema_out and col) else (schema_out or "")
-
             ds  = an.get("tabledatastore") or ""
             sch = an.get("tableowner") or ""
             tbl = an.get("tablename") or ""
             ln  = line_no(e)
-
             role = "lookup_ext" if cal=="lookup_ext" else "lookup"
 
             if not (ds and tbl):
-                # Emit placeholder if we can't parse DS/TBL
                 missing_lookup.append(Record(
                     proj, job, df, role,
                     ds or "<missing>", sch or "<missing>", tbl or "<missing>",
@@ -489,41 +452,35 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 else:
                     lookup_pos[key][pos].add(ln)
 
-    # ---- 5) Expand lookups from external function definitions,
-    #         BUT ONLY if that function is actually called in the DF (use call-site line)
-    for df_name, fn_map in df_func_positions.items():
+    # 5) expand external function lookups ONLY for DFs that actually call them
+    for df_name, fn_map in df_func_callsites.items():
         proj,job = df_context.get(df_name, ("",""))
         if not proj:
             inferred_job = df_to_job.get(df_name, "")
             job = job or inferred_job
             proj = job_to_project.get(job, "") or df_to_project.get(df_name, "")
-
-        for fn_key, positions in fn_map.items():
-            call_lines = df_func_callsites[df_name].get(fn_key, [])
-            if not call_lines:
-                # function never called in this DF -> skip entirely
+        for fn_key, callsites in fn_map.items():
+            payloads = fn_lookup_calls.get(fn_key, [])
+            if not payloads:  # function doesn't contain lookups; skip
                 continue
-            call_ln = min([ln for ln in call_lines if isinstance(ln,int) and ln>0] or [-1])
-
-            for role, ds, sch, tbl, _def_ln in fn_lookup_calls.get(fn_key, []):
+            for role, ds, sch, tbl in payloads:
+                # if DS/TBL missing, still output placeholder for each callsite
                 if not (ds and tbl):
-                    for p in positions:
+                    for pos, ln_call in callsites:
                         missing_lookup.append(Record(
                             proj, job, df_name, role,
                             ds or "<missing>", sch or "<missing>", tbl or "<missing>",
-                            p, 1, "", call_ln
+                            pos, 1, "", ln_call
                         ))
                     continue
                 remember_display(ds, sch, tbl)
                 key = (proj, job, df_name, _norm_key(ds), _norm_key(sch), _norm_key(tbl))
                 if role == "lookup_ext":
-                    for p in positions: lookup_ext_pos[key][p].add(call_ln)
+                    for pos, ln_call in callsites: lookup_ext_pos[key][pos].add(ln_call)
                 else:
-                    for p in positions: lookup_pos[key][p].add(call_ln)
+                    for pos, ln_call in callsites: lookup_pos[key][pos].add(ln_call)
 
-    # ================================================================
-    # Finalize rows (merge positions or one row per position), de-dupe, sort
-    # ================================================================
+    # -------------------- finalize --------------------
 
     def nice_names(dsN, schN, tblN):
         k=(dsN, schN, tblN)
@@ -531,62 +488,38 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 
     rows=[]
 
-    # lookups (column-level)
-    for (proj, job, df, dsN, schN, tblN), posmap in lookup_pos.items():
-        dsD, schD, tblD = nice_names(dsN, schN, tblN)
-        if MERGE_POSITIONS:
-            positions, lines = [], []
-            for p, lnset in posmap.items():
-                if p: positions.append(p)
-                lines.extend(sorted(lnset))
-            positions = sorted(dedupe(positions))
-            rows.append(Record(proj, job, df, "lookup", dsD, schD, tblD,
-                               ", ".join(positions), len(positions), "",
-                               min(lines) if lines else -1))
-        else:
-            for p, lnset in posmap.items():
-                if not str(p).strip(): continue
-                rows.append(Record(
-                    proj, job, df, "lookup", dsD, schD, tblD,
-                    p, 1, "", min(lnset) if lnset else -1
-                ))
+    for (proj,job,df,dsN,schN,tblN), posmap in lookup_pos.items():
+        dsD,schD,tblD=nice_names(dsN,schN,tblN)
+        positions=[]; lines=[]
+        for p, lnset in posmap.items():
+            if p: positions.append(p)
+            lines.extend(sorted(lnset))
+        positions = sorted(dedupe(positions))
+        rows.append(Record(proj, job, df, "lookup", dsD, schD, tblD,
+                           ", ".join(positions), len(positions), "", min(lines) if lines else -1))
 
-    # lookup_ext (schema-level)
-    for (proj, job, df, dsN, schN, tblN), posmap in lookup_ext_pos.items():
-        dsD, schD, tblD = nice_names(dsN, schN, tblN)
-        if MERGE_POSITIONS:
-            positions, lines = [], []
-            for p, lnset in posmap.items():
-                if p: positions.append(p)
-                lines.extend(sorted(lnset))
-            positions = sorted(dedupe(positions))
-            rows.append(Record(proj, job, df, "lookup_ext", dsD, schD, tblD,
-                               ", ".join(positions), len(positions), "",
-                               min(lines) if lines else -1))
-        else:
-            for p, lnset in posmap.items():
-                if not str(p).strip(): continue
-                rows.append(Record(
-                    proj, job, df, "lookup_ext", dsD, schD, tblD,
-                    p, 1, "", min(lnset) if lnset else -1
-                ))
+    for (proj,job,df,dsN,schN,tblN), posmap in lookup_ext_pos.items():
+        dsD,schD,tblD=nice_names(dsN,schN,tblN)
+        positions=[]; lines=[]
+        for p, lnset in posmap.items():
+            if p: positions.append(p)
+            lines.extend(sorted(lnset))
+        positions = sorted(dedupe(positions))
+        rows.append(Record(proj, job, df, "lookup_ext", dsD, schD, tblD,
+                           ", ".join(positions), len(positions), "", min(lines) if lines else -1))
 
-    # missing-info lookups (placeholders)
     rows.extend(missing_lookup)
 
-    # sources / targets
     for (proj,job,df,role,dsN,schN,tblN) in sorted(source_target):
         dsD,schD,tblD=nice_names(dsN,schN,tblN)
         rows.append(Record(proj, job, df, role, dsD, schD, tblD, "", 0, "", -1))
 
-    # custom SQL rows
     rows.extend(sql_rows)
 
     df = pd.DataFrame(rows)
     if df.empty:
         return df
 
-    # fill project if blank (job map, then DF containment)
     def fill_proj(row):
         if str(row["project_name"]).strip(): return row["project_name"]
         j = row.get("job_name",""); d = row.get("dataflow_name","")
@@ -595,7 +528,6 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 
     df["project_name"] = df.apply(fill_proj, axis=1)
 
-    # strict de-dup: same keys + same position should merge usage_count and keep min line
     def nkey(r):
         return (
             r["project_name"], r["job_name"], r["dataflow_name"], r["role"],
@@ -613,7 +545,6 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 
     df=df.drop(columns=["__k__"])
 
-    # cleanup & sort
     for c in ("datastore","schema","table","custom_sql_text","transformation_position"):
         df[c]=df[c].map(_pretty)
 
@@ -622,12 +553,10 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
     ]).reset_index(drop=True)
     return df
 
-# ================================================================
-# Main
-# ================================================================
+# -------------------- main --------------------
 
 def main():
-    # Update paths as needed
+    # keep your paths here
     xml_path = r"C:\Users\raksahu\Downloads\python\input\export_afs.xml"
     out_xlsx = r"C:\Users\raksahu\Downloads\python\input\output_v9_afs.xlsx"
 
