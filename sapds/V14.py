@@ -455,7 +455,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                     ds_for_sql,           # datastore
                     disp_name,            # schema (UI display name)
                     table_csv,            # table (comma-separated tables)
-                    "",                   # transformation_position BLANK
+                    disp_name,                   # transformation_position BLANK
                     len(tables),
                     '"' + (sql_text.replace('"','""')) + '"',
                     line_no(e),
