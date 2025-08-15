@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# all good except scheam name for custum SQL
+
 import re
 from collections import defaultdict
 from xml.etree import ElementTree as ET
