@@ -535,7 +535,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
              "datastore","schema","table","custom_sql_text","transformation_position"],
             dropna=False, as_index=False)
          .agg({"transformation_usage_count": "sum",
-               "source_line": "min"}))
+               "source_line": lambda x:", ".join(str(i) for i in sorted(set(x)))
+              }))
 
     df=df.drop(columns=["__k__"])
 
