@@ -3,28 +3,62 @@
 <head>
 <meta charset="utf-8" />
 <title>{{TITLE}}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-{{CSS}}
-/* You can override the defaults above with your own CSS */
+:root{
+  --grid:#e5e7eb; --zebra:#fafafa; --header:#f6f8fa;
+  --diff:#ffd7d7;
+  --mono: 13px/1.45 Menlo, Consolas, "SFMono-Regular", "DejaVu Sans Mono", monospace;
+}
+html,body{height:100%;margin:0;background:#fff;color:#111;}
+h3{margin:10px 14px;font:600 14px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+.viewer{
+  height:calc(100vh - 50px);
+  margin: 0 12px 12px;
+  border:1px solid var(--grid);
+  border-radius:6px;
+  overflow:auto;                 /* one unified scroll area */
+  background:#fff;
+}
+table{
+  border-collapse:separate;
+  border-spacing:0;
+  width:max-content;             /* expand to content; container scrolls */
+  min-width:100%;
+}
+th,td{border:1px solid var(--grid);vertical-align:top;}
+thead th{
+  position:sticky;top:0;z-index:2;background:var(--header);
+  padding:8px 10px;text-align:left;
+  font:600 12px/1.2 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+}
+.col-num{
+  width:64px;min-width:64px;text-align:right;
+  background:#f5f5f5;color:#555;font:var(--mono);padding:6px 8px;
+}
+td > pre{margin:0;padding:6px 10px;font:var(--mono);white-space:pre;}
+td.diff{background:var(--diff);}
+tbody tr:nth-child(even) td{background:var(--zebra);}
+@media (max-width: 900px){
+  .col-num{width:52px;min-width:52px}
+  td > pre{padding:6px 8px}
+}
 </style>
 </head>
 <body>
-  <h3 style="margin:12px 16px;">Text Compare – {{VIEW}} view</h3>
-
-  <table style="border-collapse:collapse;width:100%;">
+<h3>Text Compare – {{VIEW}} view</h3>
+<div class="viewer">
+  <table>
     <thead>
       <tr>
-        <th colspan="2" style="border:1px solid #e0e0e0;background:#fafafa;padding:8px;text-align:left;">
-          {{LEFT_HEADER}}
-        </th>
-        <th colspan="2" style="border:1px solid #e0e0e0;background:#fafafa;padding:8px;text-align:left;">
-          {{RIGHT_HEADER}}
-        </th>
+        <th colspan="2">{{LEFT_HEADER}}</th>
+        <th colspan="2">{{RIGHT_HEADER}}</th>
       </tr>
     </thead>
     <tbody>
       {{TABLE_ROWS}}
     </tbody>
   </table>
+</div>
 </body>
 </html>
