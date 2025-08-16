@@ -7,7 +7,7 @@ import platform
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-APP_TITLE = "Text Compare (GUI) – v2"
+APP_TITLE = "Text Compare (GUI) – v2.1"
 
 # -------------------------- Composite widget --------------------------
 class TextPane(ttk.Frame):
@@ -53,16 +53,15 @@ class TextPane(ttk.Frame):
         self.text.tag_configure("row_even", background="#f7f7f7")  # zebra
         self.text.tag_configure("char_diff", underline=True)
 
-        # slightly nicer tab stops
+        # tab stops
         self.text.configure(tabs=("1c",))
 
-        # Mouse wheel bindings (so each pane can scroll independently)
+        # Mouse wheel bindings
         self.text.bind("<MouseWheel>", self._mw)
         self.text.bind("<Button-4>", self._mw)  # Linux
         self.text.bind("<Button-5>", self._mw)
 
     def _set_mono_font(self, widget):
-        # Choose a decent monospaced font across platforms
         try:
             if platform.system() == "Darwin":
                 widget.configure(font=("Menlo", 12))
@@ -74,7 +73,6 @@ class TextPane(ttk.Frame):
             pass
 
     def _mw(self, event):
-        # Normalize delta
         if event.num == 4:
             delta = -1
         elif event.num == 5:
@@ -85,15 +83,11 @@ class TextPane(ttk.Frame):
         return "break"
 
     def _on_yscroll(self, *args):
-        # update scrollbar position
         self.vsb.set(*args)
-
-        # refresh gutter numbers for visible window
         first = self.text.index("@0,0")
         last = self.text.index(f"@0,{self.text.winfo_height()}")
         first_ln = int(first.split(".")[0])
         last_ln = int(last.split(".")[0]) + 1
-
         lines = [f"{i}\n" for i in range(first_ln, last_ln)]
         self.gutter.configure(state="normal")
         self.gutter.delete("1.0", "end")
@@ -104,7 +98,6 @@ class TextPane(ttk.Frame):
     # Public API
     def yview_moveto(self, fraction: float):
         self.text.yview_moveto(fraction)
-        # keep gutter aligned
         self._on_yscroll(*self.text.yview())
 
     def yview(self, *args):
@@ -125,11 +118,10 @@ class TextPane(ttk.Frame):
         return self.text.get("1.0", "end-1c")
 
     def copy_all(self):
-        """Copy all text from this pane to clipboard."""
         txt = self.get_text()
         self.clipboard_clear()
         self.clipboard_append(txt)
-        self.update()  # keep contents after app closes
+        self.update()
 
     def clear(self):
         self.text.delete("1.0", "end")
@@ -213,18 +205,15 @@ class TextCompareApp(tk.Tk):
         self.left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self.right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
-        # Perfect two-way vertical sync (scroll either pane; the other follows)
+        # Perfect two-way vertical sync
         def sync_from_left(*_):
-            frac = self.left.text.yview()[0]
-            self.right.yview_moveto(frac)
+            self.right.yview_moveto(self.left.text.yview()[0])
             return "break"
 
         def sync_from_right(*_):
-            frac = self.right.text.yview()[0]
-            self.left.yview_moveto(frac)
+            self.left.yview_moveto(self.right.text.yview()[0])
             return "break"
 
-        # Wrap each yscrollcommand so we can update gutter & mirror position
         self.left.text.configure(yscrollcommand=lambda *a: (self.left._on_yscroll(*a), sync_from_left()))
         self.right.text.configure(yscrollcommand=lambda *a: (self.right._on_yscroll(*a), sync_from_right()))
 
@@ -286,6 +275,36 @@ class TextCompareApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save diff:\n{e}")
 
+    # -------------------------- Rendering helpers --------------------------
+    def _render_full_view(self):
+        """Reload full original text and reapply all highlights."""
+        # Load full text
+        self.left.set_text("".join(self._left_lines_raw))
+        self.right.set_text("".join(self._right_lines_raw))
+
+        # Reapply line-level + char-level tags based on saved opcodes
+        for tag, i1, i2, j1, j2 in self._opcodes:
+            if tag == "equal":
+                continue
+            for li in range(i1, i2):
+                self.left.text.tag_add("rep_line", f"{li+1}.0", f"{li+1}.end")
+            for rj in range(j1, j2):
+                self.right.text.tag_add("rep_line", f"{rj+1}.0", f"{rj+1}.end")
+
+            if tag == "replace":
+                pairs = min(i2 - i1, j2 - j1)
+                for k in range(pairs):
+                    Ls = self._left_lines_raw[i1 + k].rstrip("\n")
+                    Rs = self._right_lines_raw[j1 + k].rstrip("\n")
+                    for t, a1, a2, b1, b2 in difflib.SequenceMatcher(None, Ls, Rs).get_opcodes():
+                        if t == "equal":
+                            continue
+                        self.left.text.tag_add("char_diff", f"{i1+k+1}.{a1}", f"{i1+k+1}.{a2}")
+                        self.right.text.tag_add("char_diff", f"{j1+k+1}.{b1}", f"{j1+k+1}.{b2}")
+
+        self.left._stripe_rows()
+        self.right._stripe_rows()
+
     # -------------------------- Compare & view modes --------------------------
     def compare(self):
         self.status.set("Comparing…")
@@ -308,35 +327,10 @@ class TextCompareApp(tk.Tk):
         sm = difflib.SequenceMatcher(None, L, R)
         self._opcodes = sm.get_opcodes()
 
-        # render full text and apply highlights
-        self.left.set_text("".join(self._left_lines_raw))
-        self.right.set_text("".join(self._right_lines_raw))
+        # render full baseline view with tags applied
+        self._render_full_view()
 
-        for tag, i1, i2, j1, j2 in self._opcodes:
-            if tag == "equal":
-                continue
-            # mark mismatched lines red
-            for li in range(i1, i2):
-                self.left.text.tag_add("rep_line", f"{li+1}.0", f"{li+1}.end")
-            for rj in range(j1, j2):
-                self.right.text.tag_add("rep_line", f"{rj+1}.0", f"{rj+1}.end")
-
-            # character-level emphasis for replacements
-            if tag == "replace":
-                pairs = min(i2 - i1, j2 - j1)
-                for k in range(pairs):
-                    Ls = self._left_lines_raw[i1 + k].rstrip("\n")
-                    Rs = self._right_lines_raw[j1 + k].rstrip("\n")
-                    for t, a1, a2, b1, b2 in difflib.SequenceMatcher(None, Ls, Rs).get_opcodes():
-                        if t == "equal":
-                            continue
-                        self.left.text.tag_add("char_diff", f"{i1+k+1}.{a1}", f"{i1+k+1}.{a2}")
-                        self.right.text.tag_add("char_diff", f"{j1+k+1}.{b1}", f"{j1+k+1}.{b2}")
-
-        # re-apply zebra after tags
-        self.left._stripe_rows()
-        self.right._stripe_rows()
-
+        # honor whichever view mode is currently selected
         self._apply_view_mode()
         self.status.set("Compared")
 
@@ -344,12 +338,13 @@ class TextCompareApp(tk.Tk):
         if not self._opcodes:
             return
         mode = self.view_mode.get()  # all | diff | same
+
         if mode == "all":
-            # show full content (already rendered), just refresh gutters/stripes
-            self.left._refresh_gutter(); self.left._stripe_rows()
-            self.right._refresh_gutter(); self.right._stripe_rows()
+            # Always rebuild from saved originals (fixes the toggle bug)
+            self._render_full_view()
             return
 
+        # Build filtered views from saved originals
         left_out, right_out = [], []
         left_tags, right_tags = [], []
         lcur = 1
@@ -373,17 +368,16 @@ class TextCompareApp(tk.Tk):
                     right_tags.append((rcur, "rep_line"))
                 rcur += 1
 
-        # load filtered text
         self.left.set_text("".join(left_out))
         self.right.set_text("".join(right_out))
 
-        # reapply line-level tags in filtered views
         for ln, tname in left_tags:
             self.left.text.tag_add(tname, f"{ln}.0", f"{ln}.end")
         for ln, tname in right_tags:
             self.right.text.tag_add(tname, f"{ln}.0", f"{ln}.end")
 
-        self.left._stripe_rows(); self.right._stripe_rows()
+        self.left._stripe_rows()
+        self.right._stripe_rows()
 
 
 # -------------------------- Run --------------------------
