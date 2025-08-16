@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>{{TITLE}}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { --font: 13px/1.35 Consolas, "Courier New", monospace; }
+  body { margin: 0; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0f172a; color:#e2e8f0; }
+  header { position: sticky; top: 0; z-index: 5; backdrop-filter: blur(6px); background: rgba(15, 23, 42, .85); border-bottom: 1px solid #334155; }
+  header .wrap { display:flex; gap:12px; align-items:center; padding:10px 14px; }
+  h1 { margin:0; font-size:16px; font-weight:600; letter-spacing:.2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .btns { display:flex; gap:6px; margin-left:auto; }
+  button { border:1px solid #475569; background:#111827; color:#e5e7eb; padding:6px 10px; border-radius:8px; cursor:pointer; }
+  button.active { background:#2563eb; border-color:#1d4ed8; }
+  .hint { opacity:.75; font-size:12px; }
+
+  /* Container scroll area */
+  .container { padding: 12px 14px 20px; }
+  .scroller { max-height: 75vh; overflow: auto; border:1px solid #334155; border-radius:8px; }
+
+  /* difflib styles tweak (dark mode) */
+  table.diff { font: var(--font); border-collapse: separate; border-spacing: 0; width: 100%; }
+  .diff th, .diff td { border: 1px solid #334155; padding: 4px 6px; vertical-align: top; }
+  .diff thead th { position: sticky; top: 0; background:#0b1220; z-index: 2; }
+  .diff .diff_header { background:#0b1220; color:#cbd5e1; }
+  .diff .diff_next { background:#0b1220; color:#94a3b8; }
+
+  .diff .blank   { background:#0b1220; }
+  .diff .diff_add{ background:#064e3b; }   /* added */
+  .diff .diff_sub{ background:#581c1c; }   /* deleted */
+  .diff .diff_chg{ background:#3f2d20; }   /* changed */
+
+  /* tighten columns a bit */
+  .diff td, .diff th { white-space: pre; }
+  .diff td:nth-child(1),
+  .diff td:nth-child(4) { width: 3ch; color:#94a3b8; text-align:right; }
+
+  /* small footer */
+  footer { padding:10px 14px 24px; color:#94a3b8; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>{{TITLE}}</h1>
+    <div class="btns">
+      <button id="btn-all" class="active" title="Show everything">All</button>
+      <button id="btn-diff" title="Show only rows with differences">Differences</button>
+      <button id="btn-same" title="Show only identical rows">Same</button>
+    </div>
+    <div class="hint">Left: {{LEFT_LABEL}} &nbsp;|&nbsp; Right: {{RIGHT_LABEL}}</div>
+  </div>
+</header>
+
+<div class="container">
+  <div class="scroller" id="diffScroll">
+    {{DIFF_TABLE}}
+  </div>
+</div>
+
+<footer>
+  Tip: click the filter buttons to toggle visibility. Scroll inside the framed area for large files.
+</footer>
+
+<script>
+(function(){
+  // difflib creates a single <table class="diff"> with many rows.
+  // We filter <tr> by whether they contain cells with any of the classes:
+  // diff_add (added), diff_sub (deleted), diff_chg (changed).
+  const table = document.querySelector("table.diff");
+  const btnAll  = document.getElementById("btn-all");
+  const btnDiff = document.getElementById("btn-diff");
+  const btnSame = document.getElementById("btn-same");
+  const buttons = [btnAll, btnDiff, btnSame];
+
+  function setActive(btn){
+    buttons.forEach(b => b.classList.toggle("active", b===btn));
+  }
+
+  function showAll() {
+    setActive(btnAll);
+    table.querySelectorAll("tbody tr").forEach(tr => tr.style.display = "");
+  }
+
+  function showOnlyDiff() {
+    setActive(btnDiff);
+    table.querySelectorAll("tbody tr").forEach(tr => {
+      const hasDiff = tr.querySelector(".diff_add, .diff_sub, .diff_chg");
+      tr.style.display = hasDiff ? "" : "none";
+    });
+  }
+
+  function showOnlySame() {
+    setActive(btnSame);
+    table.querySelectorAll("tbody tr").forEach(tr => {
+      const hasDiff = tr.querySelector(".diff_add, .diff_sub, .diff_chg");
+      tr.style.display = hasDiff ? "none" : "";
+    });
+  }
+
+  btnAll.addEventListener("click", showAll);
+  btnDiff.addEventListener("click", showOnlyDiff);
+  btnSame.addEventListener("click", showOnlySame);
+
+  // Optional: if there are any differences, default to "Differences"
+  const anyDiff = table.querySelector(".diff_add, .diff_sub, .diff_chg");
+  if (anyDiff) showOnlyDiff();
+})();
+</script>
+</body>
+</html>
