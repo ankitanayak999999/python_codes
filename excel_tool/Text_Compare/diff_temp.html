@@ -2,109 +2,183 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Text Compare Result</title>
+  <title>{{TITLE}}</title>
   <style>
+    :root { --toolbar-h: 52px; --gap: 10px; --panel-pad: 8px; }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: Arial, sans-serif;
-      background-color: #1e1e1e;
+      background: #1e1e1e;
       color: #d4d4d4;
     }
+
+    /* ===== Toolbar (top) ===== */
     .toolbar {
-      background-color: #333;
+      position: sticky; top: 0; z-index: 1000;
+      background: #333;
       padding: 10px;
-      text-align: center;
-      position: sticky;
-      top: 0;
-      z-index: 100;
+      border-bottom: 1px solid #444;
+      display: flex; justify-content: center; gap: 10px;
     }
     .toolbar button {
-      margin: 0 10px;
-      padding: 8px 15px;
-      font-size: 14px;
+      border: 1px solid #666;
+      background: #222;
+      color: #eee;
+      padding: 6px 10px;
+      border-radius: 6px;
       cursor: pointer;
-      border: none;
-      border-radius: 4px;
-      background-color: #555;
-      color: #fff;
+      font-weight: 600;
     }
-    .toolbar button:hover {
-      background-color: #777;
-    }
-    .container {
+    .toolbar button.active { background: #0b5ed7; border-color: #0b5ed7; }
+
+    /* ===== Page layout ===== */
+    .page {
       display: flex;
-      height: calc(100vh - 50px); /* Full height minus toolbar */
+      gap: var(--gap);
+      padding: var(--gap);
+      height: calc(100vh - var(--toolbar-h));
     }
     .panel {
-      flex: 1;
-      padding: 10px;
-      overflow-y: auto;
-      border-right: 1px solid #444;
-      box-sizing: border-box;
-    }
-    .panel:last-child {
-      border-right: none;
-    }
-    pre {
-      white-space: pre-wrap;
-      word-wrap: break-word;
+      flex: 1 1 50%;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
       background: #252526;
-      padding: 10px;
-      border-radius: 4px;
-      max-height: 100%;
+      border: 1px solid #3a3a3a;
+      border-radius: 8px;
+      overflow: hidden;
     }
-    .diff-added {
-      background-color: #144d14;
+    .panel .head {
+      padding: 8px 12px;
+      background: #2d2d2d;
+      border-bottom: 1px solid #3a3a3a;
+      font-weight: 700;
     }
-    .diff-removed {
-      background-color: #5a1a1a;
+    .panel .scroller {
+      padding: var(--panel-pad);
+      overflow: auto;
+      height: 100%;
     }
-    .diff-same {
-      background-color: transparent;
+
+    /* ===== Make difflib output behave nicely ===== */
+    table.diff { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    table.diff td, table.diff th {
+      border: 1px solid #3a3a3a;
+      padding: 2px 6px;
+      vertical-align: top;
+      white-space: pre;
+      overflow-wrap: anywhere;
     }
+    table.diff th { background: #1f1f1f; color: #cfcfcf; }
+
+    /* line number columns (first 2), hide them to maximize width */
+    table.diff th:nth-child(1), table.diff td:nth-child(1),
+    table.diff th:nth-child(2), table.diff td:nth-child(2) { display: none; }
+
+    /* highlight colors close to VSCode theme */
+    .diff_add { background: #09310c; }
+    .diff_chg { background: #2a2a0f; }
+    .diff_sub { background: #3a0e12; }
+    .diff_next { background: #2b2b2b; }
+
+    /* Filter helpers toggled by JS */
+    tr.has-diff { display: table-row; }
+    tr.no-diff  { display: table-row; }
+    .mode-diff tr.no-diff  { display: none; }
+    .mode-same tr.has-diff { display: none; }
+
+    /* keep left/right tables visually consistent */
+    .panel.left  table.diff { background: #252526; }
+    .panel.right table.diff { background: #252526; }
   </style>
-  <script>
-    function showFilter(mode) {
-      let allLines = document.querySelectorAll(".line");
-      allLines.forEach(line => {
-        if (mode === 'all') {
-          line.style.display = "block";
-        } else if (mode === 'diff') {
-          if (line.classList.contains("diff-same")) {
-            line.style.display = "none";
-          } else {
-            line.style.display = "block";
-          }
-        } else if (mode === 'same') {
-          if (line.classList.contains("diff-same")) {
-            line.style.display = "block";
-          } else {
-            line.style.display = "none";
-          }
-        }
-      });
-    }
-  </script>
 </head>
 <body>
-  <div class="toolbar">
-    <button onclick="showFilter('all')">Show All</button>
-    <button onclick="showFilter('diff')">Show Only Differences</button>
-    <button onclick="showFilter('same')">Show Only Same</button>
+
+  <!-- ===== TOP TOOLBAR ===== -->
+  <div class="toolbar" id="topbar">
+    <button id="btnAll"  class="active">Show All</button>
+    <button id="btnDiff">Show Only Differences</button>
+    <button id="btnSame">Show Only Same</button>
   </div>
-  <div class="container">
-    <div class="panel">
-      <h3>File 1</h3>
-      <pre id="file1-content">
-        <!-- Your File 1 lines will go here dynamically -->
-      </pre>
+
+  <!-- ===== PANELS ===== -->
+  <div class="page" id="page">
+    <div class="panel left" id="leftPanel">
+      <div class="head">File 1 — {{LEFT_LABEL}}</div>
+      <div class="scroller" id="leftScroll">
+        {{LEFT_TABLE}}
+      </div>
     </div>
-    <div class="panel">
-      <h3>File 2</h3>
-      <pre id="file2-content">
-        <!-- Your File 2 lines will go here dynamically -->
-      </pre>
+
+    <div class="panel right" id="rightPanel">
+      <div class="head">File 2 — {{RIGHT_LABEL}}</div>
+      <div class="scroller" id="rightScroll">
+        {{RIGHT_TABLE}}
+      </div>
     </div>
   </div>
+
+  <script>
+    // Mark each table row as has-diff or no-diff by scanning for diff_* cells
+    function classifyRows(root) {
+      const tables = root.querySelectorAll('table.diff');
+      tables.forEach(tbl => {
+        tbl.querySelectorAll('tr').forEach(tr => {
+          const hasDiff = tr.querySelector('.diff_add, .diff_chg, .diff_sub') !== null;
+          tr.classList.toggle('has-diff', hasDiff);
+          tr.classList.toggle('no-diff', !hasDiff);
+        });
+      });
+    }
+
+    // Apply mode: 'all' | 'diff' | 'same' to both panels
+    function setMode(mode) {
+      const page = document.getElementById('page');
+      page.classList.remove('mode-diff', 'mode-same');
+      // reset active buttons
+      document.querySelectorAll('.toolbar button').forEach(b => b.classList.remove('active'));
+
+      if (mode === 'diff') {
+        page.classList.add('mode-diff');
+        document.getElementById('btnDiff').classList.add('active');
+      } else if (mode === 'same') {
+        page.classList.add('mode-same');
+        document.getElementById('btnSame').classList.add('active');
+      } else {
+        document.getElementById('btnAll').classList.add('active');
+      }
+    }
+
+    // Sync vertical scrolling between the two panes (basic)
+    function syncScroll(a, b) {
+      let lock = false;
+      const handler = (src, dst) => () => {
+        if (lock) return;
+        lock = true;
+        const ratio = src.scrollTop / (src.scrollHeight - src.clientHeight || 1);
+        dst.scrollTop = ratio * (dst.scrollHeight - dst.clientHeight);
+        lock = false;
+      };
+      a.addEventListener('scroll', handler(a, b));
+      b.addEventListener('scroll', handler(b, a));
+    }
+
+    // Init when DOM is ready
+    (function init() {
+      classifyRows(document);
+      setMode('all');
+
+      // Buttons
+      document.getElementById('btnAll').addEventListener('click', () => setMode('all'));
+      document.getElementById('btnDiff').addEventListener('click', () => setMode('diff'));
+      document.getElementById('btnSame').addEventListener('click', () => setMode('same'));
+
+      // Optional synced scroll (remove if you prefer independent)
+      const l = document.getElementById('leftScroll');
+      const r = document.getElementById('rightScroll');
+      syncScroll(l, r);
+    })();
+  </script>
 </body>
 </html>
