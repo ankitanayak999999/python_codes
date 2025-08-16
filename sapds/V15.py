@@ -6,6 +6,9 @@ from collections import defaultdict, namedtuple
 import pandas as pd
 from lxml import etree as ET
 import sqlglot
+import os
+import glob
+import datetime
 
 # -------------------- small utils --------------------
 
@@ -646,34 +649,44 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 # -------------------- main --------------------
 
 def main():
+    current_time = datetime.datetime.now()
+    timestamp = current_time.strftime("%Y%m%d_%H%M%S")
+
     # keep your paths here
-    xml_path = r"C:\Users\raksahu\Downloads\python\input\export_afs.xml"
-    out_xlsx = r"C:\Users\raksahu\Downloads\python\input\output_v12_afs.xlsx"
+    path = "C:\\Users\\rakasahu\\Downloads\\python\\input\\sap_ds_xml_files"
+    single_file = f"{path}\\export_af.xml"
+    all_files = glob.glob(os.path.join(path, "*.xml"))
+    if single_file in all_files:
+        all_files = [single_file]
 
-    df = parse_single_xml(xml_path)
+    print(f"total number of files present in the path ({len(all_files)})")
+    print(all_files)
 
-    cols = [
-        "project_name","job_name","dataflow_name","role",
-        "datastore","schema","table",
-        "transformation_position","transformation_usage_count",
-        "custom_sql_text","source_line",
+    df_list = []
+    for file in all_files:
+        print(f'---{file}')
+        df = parse_single_xml(file)
+        df_list.append(df)
+
+    final_df = pd.concat(df_list, ignore_index=True)
+
+    output_columns = [
+        'PROJECT_NAME', 'JOB_NAME', 'DATAFLOW_NAME', 'TRANFORMATION_TYPE', 'DATA_STORE',
+        'SCHEMA_NAME', 'TABLE_NAME', 'TRANSFORMATION_POSITION',
+        'TRANSFORMATION_USAGE_COUNT', 'CUSTOM_SQL_TEXT', 'SOURCE_LINE'
     ]
-    for c in cols:
-        if c not in df.columns:
-            df[c] = ""
 
-    # --- keep your key at the end (first 7 columns) ---
-    key_cols = ["project_name","job_name","dataflow_name","role","datastore","schema","table"]
-    df["key"] = df[key_cols].astype(str).agg("||".join, axis=1)
+    final_df.columns = output_columns
 
-    export_cols = cols + ["key"]
-    df = df[export_cols]
-    # ---------------------------------------------------
+    # keep your key at the end (first 7 columns)
+    key_cols = ["PROJECT_NAME", "JOB_NAME", "DATAFLOW_NAME", "TRANFORMATION_TYPE", "DATA_STORE", "SCHEMA_NAME", "TABLE_NAME"]
+    final_df["RECORD_KEY"] = final_df[key_cols].astype(str).agg("||".join, axis=1)
 
-    with pd.ExcelWriter(out_xlsx, engine="openpyxl") as xw:
-        df.to_excel(xw, index=False, sheet_name="lineage")
+    output_path = f"{path}\\afs_15_{timestamp}.csv"
+    final_df.to_csv(output_path, index=False)
 
-    print(f"Done. Wrote: {out_xlsx}  |  Rows: {len(df)}")
 
 if __name__ == "__main__":
+    print("**** Process started at:", datetime.datetime.now())
     main()
+    print("**** Process completed at:", datetime.datetime.now())
