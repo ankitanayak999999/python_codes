@@ -1,64 +1,161 @@
-from pathlib import Path
-import difflib
-import datetime
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{TITLE}}</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #1e1e1e;
+      color: #ddd;
+    }
+    header {
+      background: #333;
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    header h1 {
+      font-size: 16px;
+      margin: 0;
+      color: #fff;
+    }
+    .buttons {
+      display: flex;
+      gap: 8px;
+    }
+    button {
+      padding: 5px 12px;
+      border: none;
+      border-radius: 5px;
+      background: #444;
+      color: #fff;
+      cursor: pointer;
+    }
+    button.active {
+      background: #0078d4;
+    }
+    .diff-wrapper {
+      display: flex;
+      height: calc(100vh - 60px);
+    }
+    .diff-col {
+      flex: 1;
+      overflow: auto;
+      border-right: 1px solid #555;
+    }
+    .diff-col:last-child {
+      border-right: none;
+    }
+    table.diff {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .diff td {
+      padding: 2px 5px;
+      vertical-align: top;
+      white-space: pre;
+      font-family: Consolas, monospace;
+    }
+    .diff .diff_header {
+      background: #333;
+      color: #fff;
+      text-align: left;
+      font-weight: bold;
+    }
+    .diff .diff_next {
+      background: #444;
+    }
+    .diff .diff_add {
+      background: #144d14;
+      color: #cfc;
+    }
+    .diff .diff_chg {
+      background: #664400;
+      color: #ff8;
+    }
+    .diff .diff_sub {
+      background: #661111;
+      color: #fcc;
+    }
+    footer {
+      padding: 10px;
+      background: #222;
+      color: #aaa;
+      font-size: 12px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
 
-def load_html_template(template_path: str, table_html: str) -> str:
-    """
-    Load the external HTML template and inject the {{DIFF_TABLE}} placeholder.
-    Other placeholders are replaced in compare_text_files.
-    """
-    tpl = Path(template_path).read_text(encoding="utf-8")
-    return tpl.replace("{{DIFF_TABLE}}", table_html)
+<header>
+  <h1>Diff Report: {{LEFT_LABEL}} vs {{RIGHT_LABEL}}</h1>
+  <div class="buttons">
+    <button id="btnAll" class="active">All</button>
+    <button id="btnDiff">Differences</button>
+    <button id="btnSame">Same</button>
+  </div>
+</header>
 
-def compare_text_files(file1: str, file2: str, project_path: str, template_file: str):
-    """
-    file1, file2: paths to input text/SQL files
-    project_path: folder where the HTML report should be written
-    template_file: path to your external 'text_compare_template.html'
-    Returns: (html_path_str, unified_diff_text)
-    """
-    now = datetime.datetime.now()
-    timestamp = now.strftime("%Y%m%d_%H%M%S_%f")
+<div class="diff-wrapper">
+  <div class="diff-col" id="leftCol">
+    {{DIFF_TABLE}}
+  </div>
+</div>
 
-    f1 = Path(file1)
-    f2 = Path(file2)
-    out_dir = Path(project_path)
-    out_dir.mkdir(parents=True, exist_ok=True)
+<footer>
+  Left: {{LEFT_LABEL}} | Right: {{RIGHT_LABEL}}
+</footer>
 
-    # --- read files exactly as-is ---
-    def _read_lines(p: Path):
-        with p.open("r", encoding="utf-8", errors="replace") as fh:
-            return fh.read().splitlines()
+<script>
+  const btnAll = document.getElementById("btnAll");
+  const btnDiff = document.getElementById("btnDiff");
+  const btnSame = document.getElementById("btnSame");
+  const table = document.querySelector(".diff");
 
-    a_lines = _read_lines(f1)
-    b_lines = _read_lines(f2)
+  function setMode(mode) {
+    btnAll.classList.remove("active");
+    btnDiff.classList.remove("active");
+    btnSame.classList.remove("active");
 
-    # --- build only the diff TABLE (not full page) ---
-    html_maker = difflib.HtmlDiff(wrapcolumn=120)
-    table_html = html_maker.make_table(
-        a_lines, b_lines,
-        fromdesc=f1.name,
-        todesc=f2.name,
-        context=False, numlines=0
-    )
+    if (mode === "all") {
+      btnAll.classList.add("active");
+      [...table.querySelectorAll("tr")].forEach(tr => tr.style.display = "");
+    }
+    else if (mode === "diff") {
+      btnDiff.classList.add("active");
+      [...table.querySelectorAll("tr")].forEach(tr => {
+        if (tr.querySelector(".diff_add,.diff_chg,.diff_sub")) {
+          tr.style.display = "";
+        } else {
+          tr.style.display = "none";
+        }
+      });
+    }
+    else if (mode === "same") {
+      btnSame.classList.add("active");
+      [...table.querySelectorAll("tr")].forEach(tr => {
+        if (!tr.querySelector(".diff_add,.diff_chg,.diff_sub")) {
+          tr.style.display = "";
+        } else {
+          tr.style.display = "none";
+        }
+      });
+    }
+  }
 
-    # --- load template and inject table ---
-    final_html = load_html_template(template_file, table_html)
+  btnAll.onclick = () => setMode("all");
+  btnDiff.onclick = () => setMode("diff");
+  btnSame.onclick = () => setMode("same");
+</script>
 
-    # --- replace remaining placeholders ---
-    final_html = (final_html
-                  .replace("{{TITLE}}", "Text Compare Result")
-                  .replace("{{LEFT_LABEL}}", f1.name)
-                  .replace("{{RIGHT_LABEL}}", f2.name))
-
-    # --- write report ---
-    html_name = f"text_compare_result_{timestamp}.html"
-    html_path = out_dir / html_name
-    html_path.write_text(final_html, encoding="utf-8")
-
-    # optional: plain unified diff text
-    udiff = "\n".join(difflib.unified_diff(
-        a_lines, b_lines, fromfile=str(f1), tofile=str(f2), lineterm=""
-    ))
-
-    return str(html_path), udiff
+</body>
+</html>
