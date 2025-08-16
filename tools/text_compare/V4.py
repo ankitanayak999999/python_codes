@@ -12,11 +12,17 @@ from tkinter import ttk, filedialog, messagebox
 APP_TITLE   = "Text Compare (GUI) – Final Compact"
 DEBOUNCE_MS = 200   # debounce for auto-compare
 
-# compact, balanced spacing
+# Balanced compact spacing (adjust if you want it even tighter)
 EDGE_PAD    = 10    # left/right outer padding for toolbar & panes
-MID_PAD     = 4     # gap between left and right panes
-HEADER_VPAD = 1     # vertical space under per-pane headers
+MID_PAD     = 6     # gap between left and right panes
+HEADER_VPAD = 2     # vertical space under per-pane headers
 
+# --- Make Windows per-monitor DPI aware (safe no-op elsewhere) ----------
+try:
+    import ctypes
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor V2
+except Exception:
+    pass
 
 def get_template_path():
     """Return absolute path to template/diff_template.html (works with PyInstaller)."""
@@ -24,7 +30,9 @@ def get_template_path():
     return os.path.join(base, "template", "diff_template.html")
 
 
-# ---------- One side (pane) ----------
+# ======================================================================
+#  One side (pane)
+# ======================================================================
 class TextPane(ttk.Frame):
     def __init__(self, master, title="", side="left", open_cb=None, clear_cb=None):
         super().__init__(master)
@@ -49,9 +57,9 @@ class TextPane(ttk.Frame):
         btns = ttk.Frame(head, padding=0)
         btns.grid(row=0, column=2, sticky="w" if side == "left" else "e")
         ttk.Button(btns, text="Copy", style="Compact.TButton",
-                   width=6, command=self.copy_all).grid(row=0, column=0, padx=(0, 3))
+                   command=self.copy_all).grid(row=0, column=0, padx=(0, 4))
         ttk.Button(btns, text=("Open Left…" if side == "left" else "Open Right…"),
-                   style="Compact.TButton", command=self.open_cb).grid(row=0, column=1, padx=(0, 3))
+                   style="Compact.TButton", command=self.open_cb).grid(row=0, column=1, padx=(0, 4))
         ttk.Button(btns, text=("Clear Left" if side == "left" else "Clear Right"),
                    style="Compact.TButton", command=self.clear_cb).grid(row=0, column=2)
 
@@ -84,7 +92,7 @@ class TextPane(ttk.Frame):
         self.text.tag_configure("char_rep", foreground="#ef6c00")  # orange
         self.text.configure(tabs=("1c",))
 
-        # Mouse wheel
+        # Wheel
         self.text.bind("<MouseWheel>", self._mw)
         self.text.bind("<Button-4>", self._mw)  # Linux
         self.text.bind("<Button-5>", self._mw)
@@ -161,7 +169,9 @@ class TextPane(ttk.Frame):
             self.text.tag_add("row_even", f"{ln}.0", f"{ln}.end")
 
 
-# ---------- HTML export (template-only) ----------
+# ======================================================================
+#  HTML export (template-only)
+# ======================================================================
 class HtmlExporter:
     def export(self, parent_window, view_name: str, left_rows, right_rows):
         path = get_template_path()
@@ -222,19 +232,26 @@ class HtmlExporter:
         return "\n".join(rows)
 
 
-# ---------- App ----------
+# ======================================================================
+#  App
+# ======================================================================
 class TextCompareApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.minsize(1200, 700)
-        try:
-            self.call("tk", "scaling", 1.2)
-        except tk.TclError:
-            pass
+        self.minsize(1100, 650)
 
-        # compact styles for buttons/controls (shrinks internal padding)
+        # DPI scaling derived from actual screen DPI for consistent sizing
+        self._apply_dpi_scaling()
+
+        # Stable theme + compact control styles + consistent UI font
         style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        default_ui = ("Segoe UI", 10) if platform.system() == "Windows" else ("Helvetica", 11)
+        self.option_add("*Font", default_ui)
         style.configure("Compact.TButton", padding=(4, 1))
         style.configure("Compact.TRadiobutton", padding=0)
         style.configure("Compact.TCheckbutton", padding=0)
@@ -258,23 +275,36 @@ class TextCompareApp(tk.Tk):
         self._bind_auto_refresh()
         self._schedule_compare()
 
+    # ----- DPI scaling -----
+    def _apply_dpi_scaling(self):
+        try:
+            ppi = self.winfo_fpixels('1i')  # pixels per inch
+            scale = max(0.80, min(2.0, ppi / 72.0))  # clamp a bit
+            self.tk.call('tk', 'scaling', scale)
+        except Exception:
+            pass
+
+    # ----- UI -----
     def _build_ui(self):
+        # root expands
         self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
         main = ttk.Frame(self, padding=0)
         main.grid(row=0, column=0, sticky="nsew")
-        self.rowconfigure(0, weight=1)
+        main.columnconfigure(0, weight=1)      # the only column
+        main.rowconfigure(1, weight=1)         # the panes row grows
 
         # Toolbar with symmetric outer padding.
         toolbar = ttk.Frame(main, padding=(EDGE_PAD, 2, EDGE_PAD, 4))
         toolbar.grid(row=0, column=0, sticky="ew")
-        # Left cluster, flexible spacer, right cluster (no button stretching).
         toolbar.columnconfigure(0, weight=0)
-        toolbar.columnconfigure(1, weight=1)  # spacer absorbs extra width
+        toolbar.columnconfigure(1, weight=1)   # flexible spacer absorbs extra width
         toolbar.columnconfigure(2, weight=0)
 
+        # Left cluster (doesn't stretch)
         left_cluster = ttk.Frame(toolbar, padding=0)
         left_cluster.grid(row=0, column=0, sticky="w")
-
         self.nav_counter_var = tk.StringVar(value="0 / 0")
         ttk.Button(left_cluster, text="Prev Change", style="Compact.TButton",
                    command=self.prev_change).grid(row=0, column=0, padx=(0, 4))
@@ -288,6 +318,7 @@ class TextCompareApp(tk.Tk):
 
         # Spacer (column 1) expands automatically.
 
+        # Right cluster (view mode + options)
         right_cluster = ttk.Frame(toolbar, padding=0)
         right_cluster.grid(row=0, column=2, sticky="e")
         for i, (lab, val) in enumerate([("All", "all"), ("Difference", "diff"), ("Same", "same")]):
@@ -302,8 +333,9 @@ class TextCompareApp(tk.Tk):
         # Panes area with symmetric outer padding + small middle gap
         panes = ttk.Frame(main, padding=(EDGE_PAD, 0, EDGE_PAD, 0))
         panes.grid(row=1, column=0, sticky="nsew")
-        panes.columnconfigure(0, weight=1)
-        panes.columnconfigure(1, weight=1)
+        # Equal widths on resize
+        panes.columnconfigure(0, weight=1, uniform="halves")
+        panes.columnconfigure(1, weight=1, uniform="halves")
         panes.rowconfigure(0, weight=1)
 
         self.left  = TextPane(panes, "Left (Original / A)", side="left",
@@ -327,13 +359,13 @@ class TextCompareApp(tk.Tk):
         self.bind_all("<Alt-Up>", lambda e: self.prev_change())
         self.bind_all("<Alt-Down>", lambda e: self.next_change())
 
-        # Status bar
+        # Status bar (slim)
         self.status = tk.StringVar(value="Ready")
         ttk.Label(self, textvariable=self.status, anchor="w", relief="sunken", padding=(6,1)).grid(
             row=99, column=0, sticky="ew"
         )
 
-    # auto refresh
+    # ----- Auto refresh -----
     def _bind_auto_refresh(self):
         self.ignore_case.trace_add("write", lambda *_: self._schedule_compare())
         self.ignore_ws.trace_add("write", lambda *_: self._schedule_compare())
@@ -352,7 +384,7 @@ class TextCompareApp(tk.Tk):
             except Exception: pass
         self._compare_after_id = self.after(DEBOUNCE_MS, self.compare)
 
-    # files
+    # ----- File ops -----
     def _read_text_file(self, path: str) -> str:
         try:
             with open(path, "r", encoding="utf-8") as f: return f.read()
@@ -384,12 +416,12 @@ class TextCompareApp(tk.Tk):
         self._update_counter()
         self._set_status("Cleared both panes")
 
-    # export
+    # ----- Export -----
     def export_html(self):
         left_rows, right_rows = self._collect_view_rows_for_export()
         self._exporter.export(self, self.view_mode.get().capitalize(), left_rows, right_rows)
 
-    # compare + view modes
+    # ----- Compare & view modes -----
     def compare(self):
         self._left_lines_raw  = self.left.get_text().splitlines(keepends=True)
         self._right_lines_raw = self.right.get_text().splitlines(keepends=True)
@@ -515,7 +547,7 @@ class TextCompareApp(tk.Tk):
                         self.left.text.tag_add("char_rep", f"{ldisp}.{a1}", f"{ldisp}.{a2}")
                         self.right.text.tag_add("char_rep", f"{rdisp}.{b1}", f"{rdisp}.{b2}")
 
-    # navigation
+    # ----- Navigation -----
     def _rebuild_nav_targets(self):
         targets = []
         for tag, i1, i2, j1, j2 in self._opcodes:
@@ -571,7 +603,7 @@ class TextCompareApp(tk.Tk):
     def _set_status(self, msg: str):
         self.status.set(msg)
 
-    # export data for template
+    # ----- Export data for template -----
     def _collect_view_rows_for_export(self):
         if not self._opcodes and (self.left.get_text() or self.right.get_text()):
             L = self.left.get_text().splitlines(keepends=True)
