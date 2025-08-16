@@ -653,7 +653,7 @@ def main():
     timestamp = current_time.strftime("%Y%m%d_%H%M%S")
 
     # keep your paths here
-    path = "C:\\Users\\rakasahu\\Downloads\\python\\input\\sap_ds_xml_files"
+    path=r"C:\\Users\\raksahu\\Downloads\\python\\input\\sap_ds_xml_files"
     single_file = f"{path}\\export_af.xml"
     all_files = glob.glob(os.path.join(path, "*.xml"))
     if single_file in all_files:
