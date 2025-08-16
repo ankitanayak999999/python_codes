@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>File Comparison</title>
+    <style>
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0;
+            padding: 0;
+            /* Add padding to the top to prevent content from being hidden by the fixed header */
+            padding-top: 50px; 
+        }
+        .app-header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 50px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #dee2e6;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            box-sizing: border-box;
+        }
+        .controls button {
+            padding: 8px 16px;
+            margin: 0 5px;
+            cursor: pointer;
+            font-size: 14px;
+            border: 1px solid #aaa;
+            border-radius: 5px;
+            background-color: #e7e7e7;
+        }
+        .controls button.active {
+            background-color: #007bff;
+            color: white;
+            border-color: #007bff;
+        }
+        .container {
+            display: flex;
+            /* Height is 100% of viewport height minus the header height */
+            height: calc(100vh - 50px);
+        }
+        .pane {
+            width: 50%;
+            overflow-y: scroll;
+            border-right: 1px solid #ccc;
+            box-sizing: border-box;
+        }
+        .pane:last-child { border-right: none; }
+        .pane-header {
+            padding: 10px;
+            background: #f1f1f1;
+            border-bottom: 1px solid #ccc;
+            font-weight: bold;
+            text-align: center;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            position: sticky;
+            top: 0;
+            z-index: 900;
+        }
+        .pane-content { padding: 10px; }
+        .line { white-space: pre; min-height: 1.2em; }
+        .ln {
+            display: inline-block;
+            width: 40px;
+            color: #888;
+            text-align: right;
+            margin-right: 15px;
+            -webkit-user-select: none; user-select: none;
+        }
+        .same { background-color: #fff; }
+        .added { background-color: #e6ffed; }
+        .deleted { background-color: #ffeef0; }
+        .placeholder { background-color: #f8f8f8; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <header class="app-header">
+        <div class="controls">
+            <button id="showAllBtn" class="active" onclick="showFilter('all')">Show All</button>
+            <button id="showDiffBtn" onclick="showFilter('diff')">Show Differences</button>
+            <button id="showSameBtn" onclick="showFilter('same')">Show Same</button>
+        </div>
+    </header>
+
+    <div class="container">
+        <div id="left-pane" class="pane">
+            <div class="pane-header" title="{{FILE1_PATH}}">{{FILE1_PATH}}</div>
+            <div class="pane-content">{{LEFT_PANE_CONTENT}}</div>
+        </div>
+        <div id="right-pane" class="pane">
+            <div class="pane-header" title="{{FILE2_PATH}}">{{FILE2_PATH}}</div>
+            <div class="pane-content">{{RIGHT_PANE_CONTENT}}</div>
+        </div>
+    </div>
+
+    <script>
+        const leftPane = document.getElementById('left-pane');
+        const rightPane = document.getElementById('right-pane');
+        let isSyncing = false;
+
+        leftPane.addEventListener('scroll', () => {
+            if (!isSyncing) {
+                isSyncing = true;
+                rightPane.scrollTop = leftPane.scrollTop;
+            }
+            isSyncing = false;
+        });
+
+        rightPane.addEventListener('scroll', () => {
+            if (!isSyncing) {
+                isSyncing = true;
+                leftPane.scrollTop = rightPane.scrollTop;
+            }
+            isSyncing = false;
+        });
+
+        function showFilter(filter) {
+            const allLines = document.querySelectorAll('.line');
+            allLines.forEach(line => {
+                line.classList.remove('hidden'); // Reset first
+                const isSame = line.classList.contains('same');
+                if (filter === 'diff' && isSame) {
+                    line.classList.add('hidden');
+                } else if (filter === 'same' && !isSame) {
+                    line.classList.add('hidden');
+                }
+            });
+
+            document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
+            const buttonId = filter === 'all' ? 'showAllBtn' : (filter === 'diff' ? 'showDiffBtn' : 'showSameBtn');
+            document.getElementById(buttonId).classList.add('active');
+        }
+    </script>
+</body>
+</html>
