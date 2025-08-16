@@ -1,49 +1,34 @@
-import os
+def load_html_template(template_file: str, diff_table: str) -> str:
+    with open(template_file, "r", encoding="utf-8") as f:
+        tpl = f.read()
+    return tpl.replace("{{ diff_table }}", diff_table)
 
-def write_diff_html(diff_blocks_html: str, output_html_path: str, template_filename: str = "diff_template.html"):
-    """
-    Loads the external HTML template, injects diff content, and writes the final report.
+def compare_text_files(file1: str, file2: str, project_path: str, template_file: str = None):
 
-    Parameters
-    ----------
-    diff_blocks_html : str
-        The concatenated HTML for all diff sections (your generated <div class="diff-container">...</div> blocks).
-    output_html_path : str
-        Full path for the final HTML report to be written.
-    template_filename : str
-        The HTML template filename (default: 'diff_template.html') located in the same folder as this script.
-    """
-    # Find the template in the same folder as this Python file
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    template_path = os.path.join(script_dir, template_filename)
+html_maker = difflib.HtmlDiff(wrapcolumn=120)
 
-    # Read the template
-    with open(template_path, "r", encoding="utf-8") as f:
-        template_html = f.read()
+# Build only the diff TABLE (not a full HTML page)
+table_html = html_maker.make_table(
+    a_lines, b_lines,
+    fromdesc=from_desc, todesc=to_desc,
+    context=False,   # show all lines; your template adds filters
+    numlines=0
+)
 
-    # Inject your diff content
-    final_html = template_html.replace("{{ diff_content }}", diff_blocks_html)
+# Default template path if none provided
+if template_file is None:
+    from pathlib import Path
+    template_file = str(Path(__file__).with_name("text_compare_template.html"))
 
-    # Ensure output folder exists
-    os.makedirs(os.path.dirname(output_html_path), exist_ok=True)
+# Load template and inject the table
+final_html = load_html_template(template_file, table_html)
 
-    # Write the final report
-    with open(output_html_path, "w", encoding="utf-8") as f:
-        f.write(final_html)
+# Write the final HTML
+html_path.write_text(final_html, encoding="utf-8")
 
 
-def generate_sql_diff_report(file1_path, file2_path, output_dir):
-    # ... your logic to read files, diff them, and build `diff_content` ...
+hp, ud = compare_text_files(file_1, file_2, project_path)
+# or
+hp, ud = compare_text_files(file_1, file_2, project_path, template_file=r"C:\path\to\text_compare_template.html")
 
-    # Example of one block you might append while looping pairs:
-    # diff_content += f'''
-    #   <div class="diff-container diff-added">
-    #     <div class="diff-header">Object: XYZ</div>
-    #     <h3>File 1</h3><pre>{escaped_sql1}</pre>
-    #     <h3>File 2</h3><pre>{escaped_sql2}</pre>
-    #   </div>
-    # '''
-
-    output_html = os.path.join(output_dir, "sql_diff_report.html")
-    write_diff_html(diff_blocks_html=diff_content, output_html_path=output_html)
-    return output_html
+pyinstaller your_spec_or_cmd --add-data "text_compare_template.html;."
