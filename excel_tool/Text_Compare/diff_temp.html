@@ -1,149 +1,67 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Text Compare Result</title>
-  <style>
-    :root {
-      --bg: #1e1e1e;
-      --bg2:#2b2b2b;
-      --fg: #ddd;
-      --accent:#007acc;
-      --btn:#444;
-      --line: #333;
-    }
-    html, body { height: 100%; }
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--fg);
-      font-family: Consolas, "Courier New", monospace;
-      overflow: hidden; /* keep one-screen layout */
-    }
-    .toolbar {
-      position: sticky;
-      top: 0;
-      z-index: 100;
-      background: var(--bg2);
-      padding: 8px 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      border-bottom: 1px solid var(--line);
-    }
-    .toolbar .buttons button {
-      background: var(--btn);
-      color: #fff;
-      border: 0;
-      border-radius: 6px;
-      padding: 6px 12px;
-      margin-right: 8px;
-      cursor: pointer;
-    }
-    .toolbar .buttons button.active { background: var(--accent); }
-    .labels { opacity: 0.8; }
+from pathlib import Path
+import difflib
+import datetime
 
-    .container {
-      display: flex;
-      height: calc(100vh - 50px); /* rest of the screen */
-    }
-    .panel {
-      flex: 1 1 50%;
-      overflow: auto;           /* its own scroll bar */
-      border-right: 1px solid var(--line);
-      padding: 8px;
-      box-sizing: border-box;
-    }
-    .panel.right { border-right: 0; }
+def _read_lines(p: Path):
+    with p.open("r", encoding="utf-8", errors="replace") as fh:
+        return fh.read().splitlines()
 
-    h3 { margin: 8px 0 12px; font-weight: 600; font-size: 14px; }
+def _load_template(template_path: str) -> str:
+    return Path(template_path).read_text(encoding="utf-8")
 
-    /* HtmlDiff table baseline */
-    table.diff { border-collapse: collapse; width: 100%; table-layout: fixed; }
-    table.diff td, table.diff th {
-      border: 1px solid var(--line);
-      padding: 2px 6px;
-      vertical-align: top;
-      white-space: pre;
-      word-wrap: break-word;
-    }
-    .diff_add { background: #0f2f0f; color: #b8f6b8; }
-    .diff_sub { background: #3a0d0d; color: #ffb3c1; }
-    .diff_chg { background: #2b1a49; color: #e6d9ff; }
+def _fill_template(tpl: str, *, table_html: str, left_label: str, right_label: str) -> str:
+    # We inject the SAME full table into both panels; CSS in the template
+    # will hide left/right columns in each panel.
+    return (
+        tpl.replace("{{LEFT_LABEL}}", left_label)
+           .replace("{{RIGHT_LABEL}}", right_label)
+           .replace("{{FILE1_CONTENT}}", table_html)
+           .replace("{{FILE2_CONTENT}}", table_html)
+    )
 
-    /* Hide columns using nth-child (HtmlDiff columns order):
-       1=marker, 2=left line#, 3=left text, 4=right line#, 5=right text */
-    .panel.left  table.diff th:nth-child(4),
-    .panel.left  table.diff th:nth-child(5),
-    .panel.left  table.diff td:nth-child(4),
-    .panel.left  table.diff td:nth-child(5) { display: none; }
+def compare_text_files(file1: str, file2: str, project_path: str, template_file: str) -> tuple[str, str]:
+    """
+    Build a side-by-side HTML diff with a top toolbar and two independent
+    scrollable panels (left/right). Returns (html_output_path, unified_diff_text).
+    """
+    now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    f1 = Path(file1)
+    f2 = Path(file2)
+    out_dir = Path(project_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    .panel.right table.diff th:nth-child(1),
-    .panel.right table.diff th:nth-child(2),
-    .panel.right table.diff td:nth-child(1),
-    .panel.right table.diff td:nth-child(2) { display: none; }
+    # Read
+    a_lines = _read_lines(f1)
+    b_lines = _read_lines(f2)
 
-    /* Also hide the left text column in right panel and the right text in left panel */
-    .panel.right table.diff th:nth-child(3),
-    .panel.right table.diff td:nth-child(3) { display: none; }
-    .panel.left  table.diff th:nth-child(3) { } /* keep left text visible */
-  </style>
-</head>
-<body>
+    # Labels
+    left_label  = f1.name
+    right_label = f2.name
 
-  <!-- TOP TOOLBAR -->
-  <div class="toolbar">
-    <div class="buttons">
-      <button id="btnAll" class="active">All</button>
-      <button id="btnDiff">Differences</button>
-      <button id="btnSame">Same</button>
-    </div>
-    <div class="labels">Left: {{LEFT_LABEL}} | Right: {{RIGHT_LABEL}}</div>
-  </div>
+    # One HtmlDiff table (we'll place it twice; CSS will hide columns)
+    html_maker = difflib.HtmlDiff(wrapcolumn=120)
+    table_html = html_maker.make_table(
+        a_lines, b_lines,
+        fromdesc=left_label, todesc=right_label,
+        context=False, numlines=0
+    )
 
-  <!-- TWO INDEPENDENT SCROLLABLE PANELS -->
-  <div class="container">
-    <div class="panel left">
-      <h3>{{LEFT_LABEL}}</h3>
-      {{FILE1_CONTENT}}
-    </div>
-    <div class="panel right">
-      <h3>{{RIGHT_LABEL}}</h3>
-      {{FILE2_CONTENT}}
-    </div>
-  </div>
+    # Load + fill template
+    tpl = _load_template(template_file)
+    final_html = _fill_template(
+        tpl,
+        table_html=table_html,
+        left_label=left_label,
+        right_label=right_label
+    )
 
-  <script>
-    // Simple toggle: show all / only changed / only same
-    const buttons = {
-      all:  document.getElementById('btnAll'),
-      diff: document.getElementById('btnDiff'),
-      same: document.getElementById('btnSame')
-    };
+    # Write HTML
+    html_name = f"text_compare_result_{now}.html"
+    html_path = out_dir / html_name
+    html_path.write_text(final_html, encoding="utf-8")
 
-    function setActive(btn){
-      [buttons.all, buttons.diff, buttons.same].forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-    }
-
-    function applyFilter(mode){
-      document.querySelectorAll('table.diff tr').forEach(tr => {
-        // look for diff class flags on the row
-        const c = tr.className || '';
-        const isChange = /diff_(add|chg|sub)/.test(c);
-        if (mode === 'diff') {
-          tr.style.display = isChange ? '' : 'none';
-        } else if (mode === 'same') {
-          tr.style.display = isChange ? 'none' : '';
-        } else {
-          tr.style.display = '';
-        }
-      });
-    }
-
-    buttons.all.addEventListener('click',  () => { setActive(buttons.all);  applyFilter('all');  });
-    buttons.diff.addEventListener('click', () => { setActive(buttons.diff); applyFilter('diff'); });
-    buttons.same.addEventListener('click', () => { setActive(buttons.same); applyFilter('same'); });
-  </script>
-</body>
-</html>
+    # Optional unified diff text (useful for logs)
+    udiff = "\n".join(
+        difflib.unified_diff(a_lines, b_lines, fromfile=str(f1), tofile=str(f2), lineterm="")
+    )
+    return str(html_path), udiff
