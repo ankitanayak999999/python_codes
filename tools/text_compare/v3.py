@@ -9,8 +9,9 @@ import html
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-APP_TITLE = "Text Compare (GUI) – Final"
+APP_TITLE   = "Text Compare (GUI) – Final"
 DEBOUNCE_MS = 200  # debounce for auto-compare
+
 
 # ----------------------------------------------------------------------
 # PyInstaller-friendly template resolver
@@ -18,12 +19,9 @@ DEBOUNCE_MS = 200  # debounce for auto-compare
 def get_template_path():
     """
     Return absolute path to template/diff_template.html.
-    Works both in dev and in PyInstaller (onefile/onedir).
+    Works in dev and when frozen by PyInstaller (onefile/onedir).
     """
-    if hasattr(sys, "_MEIPASS"):   # set by PyInstaller when frozen
-        base = sys._MEIPASS
-    else:
-        base = os.path.dirname(__file__)
+    base = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
     return os.path.join(base, "template", "diff_template.html")
 
 
@@ -51,7 +49,7 @@ class TextPane(ttk.Frame):
         self.vsb = ttk.Scrollbar(self, orient="vertical")
         self.vsb.grid(row=1, column=1, sticky="ns")
 
-        # Main text
+        # Main text widget
         self.text = tk.Text(self, wrap="none", undo=True)
         self._set_mono_font(self.text)
         self.text.grid(row=1, column=2, sticky="nsew")
@@ -59,15 +57,20 @@ class TextPane(ttk.Frame):
         self.hsb.grid(row=2, column=2, sticky="ew")
         self.text.configure(xscrollcommand=self.hsb.set)
 
-        # Link vertical scrollbar; keep gutter numbers in sync
+        # Link vertical scrollbar; keep gutter in sync
         self.vsb.config(command=self.text.yview)
         self.text.configure(yscrollcommand=self._on_yscroll)
 
         # Tags
-        self.text.tag_configure("row_even", background="#f7f7f7")   # zebra
-        self.text.tag_configure("rep_line", background="#ffd7d7")   # diff row
-        self.text.tag_configure("char_diff", underline=True)        # char-level within replace
-        self.text.tag_configure("cursor_line", background="#fff59d")# current hunk (yellow)
+        self.text.tag_configure("row_even",    background="#f7f7f7")   # zebra
+        self.text.tag_configure("rep_line",    background="#ffd7d7")   # line-level diff
+        self.text.tag_configure("cursor_line", background="#fff59d")   # current hunk (yellow)
+
+        # char-level colored tags
+        self.text.tag_configure("char_del", foreground="#c62828")      # red   (left deletions)
+        self.text.tag_configure("char_add", foreground="#2e7d32")      # green (right insertions)
+        self.text.tag_configure("char_rep", foreground="#ef6c00")      # orange (replacements)
+
         self.text.configure(tabs=("1c",))
 
         # Wheel (cross-platform)
@@ -99,7 +102,7 @@ class TextPane(ttk.Frame):
     def _on_yscroll(self, *args):
         self.vsb.set(*args)
         first = int(self.text.index("@0,0").split(".")[0])
-        last = int(self.text.index(f"@0,{self.text.winfo_height()}").split(".")[0]) + 1
+        last  = int(self.text.index(f"@0,{self.text.winfo_height()}").split(".")[0]) + 1
         nums = [f"{i}\n" for i in range(first, last)]
         self.gutter.configure(state="normal")
         self.gutter.delete("1.0", "end")
@@ -154,11 +157,9 @@ class HtmlExporter:
     """
     Template-only HTML exporter.
 
-    Customize here (no UI selection):
-      - get_template_path(): where the template lives (bundled with app)
-      - _default_css(): only used if template includes {{CSS}}
-      - build_rows(): defines the row HTML
-      - render_with_template(): template markers
+    Customize here:
+      - get_template_path() decides where the template file lives
+      - _default_css() only used if template contains {{CSS}}
     """
     def export(self, parent_window, view_name: str, left_rows, right_rows):
         template_path = get_template_path()
@@ -420,7 +421,7 @@ class TextCompareApp(tk.Tk):
 
         self._opcodes = difflib.SequenceMatcher(None, L, R).get_opcodes()
         self._render_full_view()
-        self._apply_view_mode()  # also rebuilds navigation targets
+        self._apply_view_mode()  # also rebuilds navigation targets & char diffs
 
     def _render_full_view(self):
         self.left.set_text("".join(self._left_lines_raw))
@@ -433,11 +434,11 @@ class TextCompareApp(tk.Tk):
         self._right_map_display = {i: i for i in range(1, right_total + 1)}
 
         # clear tags
-        for tagname in ("rep_line", "char_diff", "cursor_line"):
+        for tagname in ("rep_line", "char_del", "char_add", "char_rep", "cursor_line"):
             self.left.text.tag_remove(tagname, "1.0", "end")
             self.right.text.tag_remove(tagname, "1.0", "end")
 
-        # apply diff tags
+        # apply line-level diff tags
         for tag, i1, i2, j1, j2 in self._opcodes:
             if tag == "equal":
                 continue
@@ -445,18 +446,10 @@ class TextCompareApp(tk.Tk):
                 self.left.text.tag_add("rep_line", f"{li+1}.0", f"{li+1}.end")
             for rj in range(j1, j2):
                 self.right.text.tag_add("rep_line", f"{rj+1}.0", f"{rj+1}.end")
-            if tag == "replace":
-                pairs = min(i2 - i1, j2 - j1)
-                for k in range(pairs):
-                    Ls = self._left_lines_raw[i1 + k].rstrip("\n")
-                    Rs = self._right_lines_raw[j1 + k].rstrip("\n")
-                    for t, a1, a2, b1, b2 in difflib.SequenceMatcher(None, Ls, Rs).get_opcodes():
-                        if t == "equal": continue
-                        self.left.text.tag_add("char_diff", f"{i1+k+1}.{a1}", f"{i1+k+1}.{a2}")
-                        self.right.text.tag_add("char_diff", f"{j1+k+1}.{b1}", f"{j1+k+1}.{b2}")
 
         self.left._stripe_rows(); self.right._stripe_rows()
         self._rebuild_nav_targets()
+        self._paint_char_diffs_for_current_view()
 
     def _apply_view_mode(self):
         if not self._opcodes:
@@ -467,9 +460,12 @@ class TextCompareApp(tk.Tk):
 
         mode = self.view_mode.get()
         if mode == "all":
-            self._rebuild_nav_targets()
+            # IMPORTANT FIX: actually restore full panes
+            self._render_full_view()
+            self._paint_char_diffs_for_current_view()
             return
 
+        # Build filtered views and mapping orig -> display index
         left_out, right_out = [], []
         left_tags, right_tags = [], []
         left_orig_indices, right_orig_indices = [], []
@@ -496,7 +492,7 @@ class TextCompareApp(tk.Tk):
         self.left.set_text("".join(left_out))
         self.right.set_text("".join(right_out))
 
-        for tagname in ("rep_line", "char_diff", "cursor_line"):
+        for tagname in ("rep_line", "char_del", "char_add", "char_rep", "cursor_line"):
             self.left.text.tag_remove(tagname, "1.0", "end")
             self.right.text.tag_remove(tagname, "1.0", "end")
         for ln in left_tags:
@@ -508,6 +504,44 @@ class TextCompareApp(tk.Tk):
         self._left_map_display  = {orig: idx+1 for idx, orig in enumerate(left_orig_indices)}
         self._right_map_display = {orig: idx+1 for idx, orig in enumerate(right_orig_indices)}
         self._rebuild_nav_targets()
+        self._paint_char_diffs_for_current_view()
+
+    # -------- char-level colored diffs for current view --------
+    def _paint_char_diffs_for_current_view(self):
+        # clear old char tags
+        for tagname in ("char_del", "char_add", "char_rep"):
+            self.left.text.tag_remove(tagname, "1.0", "end")
+            self.right.text.tag_remove(tagname, "1.0", "end")
+
+        def map_left(orig):  return self._left_map_display.get(orig)
+        def map_right(orig): return self._right_map_display.get(orig)
+
+        for tag, i1, i2, j1, j2 in self._opcodes:
+            if tag != "replace":
+                continue  # only 'replace' has both lines to compare char-by-char
+
+            pairs = min(i2 - i1, j2 - j1)
+            for k in range(pairs):
+                left_orig  = i1 + k + 1
+                right_orig = j1 + k + 1
+
+                ldisp = map_left(left_orig)
+                rdisp = map_right(right_orig)
+                if ldisp is None or rdisp is None:
+                    continue  # not visible in current view
+
+                Ls = self._left_lines_raw[i1 + k].rstrip("\n")
+                Rs = self._right_lines_raw[j1 + k].rstrip("\n")
+                for t, a1, a2, b1, b2 in difflib.SequenceMatcher(None, Ls, Rs).get_opcodes():
+                    if t == "equal":
+                        continue
+                    if t == "delete":
+                        self.left.text.tag_add("char_del", f"{ldisp}.{a1}", f"{ldisp}.{a2}")
+                    elif t == "insert":
+                        self.right.text.tag_add("char_add", f"{rdisp}.{b1}", f"{rdisp}.{b2}")
+                    else:  # replace
+                        self.left.text.tag_add("char_rep", f"{ldisp}.{a1}", f"{ldisp}.{a2}")
+                        self.right.text.tag_add("char_rep", f"{rdisp}.{b1}", f"{rdisp}.{b2}")
 
     # ---------------- Navigation (Prev/Next Change) ----------------
     def _rebuild_nav_targets(self):
@@ -518,7 +552,7 @@ class TextCompareApp(tk.Tk):
             right_orig = (j1 + 1) if j1 < j2 else None
             left_disp  = self._left_map_display.get(left_orig) if left_orig else None
             right_disp = self._right_map_display.get(right_orig) if right_orig else None
-            if left_disp is None and right_disp is None:  # nothing visible in this view
+            if left_disp is None and right_disp is None:
                 continue
             targets.append((left_disp, right_disp))
 
