@@ -684,6 +684,7 @@ def main():
 
     output_path = f"{path}\\afs_15_{timestamp}.csv"
     final_df.to_csv(output_path, index=False)
+    print(f"Done. Wrote:{output_path} | Rows: {len(final_df)}")
 
 
 if __name__ == "__main__":
