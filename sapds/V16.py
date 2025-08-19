@@ -397,25 +397,27 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e), "")
                 source_target.add(key)
 
-        # 2) FILE / EXCEL sources/targets (in DF)
+        # 2) FILE / EXCEL sources/targets (only if inside DF) — now with source_line
         if tag in ("difilesource","difiletarget","diexcelsource","diexceltarget") and in_dataflow(e, pm):
             proj,job,df = context_for(e)
+        
+            # role from tag (Excel "source" should always be source)
             role = "source" if ("source" in tag) else "target"
-            fmt  = (a.get("formatname") or a.get("file_format") or "").strip()
-
-            # prefer DIOutputView name for "table"
+        
+            a = attrs_ci(e)
+        
+            # Try to capture some notion of format
+            fmt = (a.get("formatname") or a.get("file_format") or "").strip()
+        
+            # Prefer inner DIOutputView name (often the sheet/logical name) for "table"
             outview_name = ""
             for ch in e.iter():
                 if lower(strip_ns(getattr(ch, "tag", ""))) in ("dioutputview","outputview"):
                     outview_name = (attrs_ci(ch).get("name") or "").strip()
                     if outview_name:
                         break
-
-            # physical file name (NEW)
-            physical_filename = (
-                a.get("filename") or a.get("file") or a.get("path") or ""
-            ).strip()
-
+        
+            # Filename / dataset name / element name
             fname = (
                 a.get("filename")     or
                 a.get("name")         or
@@ -423,8 +425,9 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 ""
             ).strip()
             if outview_name:
-                fname = fname or outview_name  # prefer logical name when present
-
+                # if we found a nicer logical name, prefer it
+                fname = fname or outview_name
+        
             if tag in ("diexcelsource","diexceltarget"):
                 ds  = (a.get("datastorename") or a.get("datastore") or "EXCEL").strip()
                 sch = (fmt or "EXCEL")
@@ -433,9 +436,9 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 ds  = (a.get("datastorename") or a.get("datastore") or "FILE").strip() or "FILE"
                 sch = (fmt or "FILE")
                 tbl = (fname or "FILE_OBJECT")
-
-            remember_display(ds,sch,tbl)
-            key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e), physical_filename)
+        
+            remember_display(ds, sch, tbl)
+            key = (proj, job, df, role, _norm_key(ds), _norm_key(sch), _norm_key(tbl), line_no(e))
             source_target.add(key)
 
         # 3) CUSTOM SQL (inside DF) — schema & position use UI display name
