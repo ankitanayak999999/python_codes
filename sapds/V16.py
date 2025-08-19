@@ -694,8 +694,8 @@ def main():
     print(all_files)
 
     df_list = []
-    for file in all_files:
-        print(f'---{file}')
+    for i,file in enumerate(all_files):
+        print(f'row number:{i}-File Name{file}')
         df = parse_single_xml(file)
         df_list.append(df)
 
