@@ -17,3 +17,15 @@ if tag == "function_call" and lower(a.get("name","")) == "lookup_ext":
         seen_ext_keys.add(k)  # so nothing else can add a dup for this key
 
 
+
+
+
+import re
+
+def clean_sql(sql_text):
+    # Replace parameterized schema like ${G_Schema} or [${G_Schema}]
+    sql_text = re.sub(r"\[\$\{[^}]+\}\]", "DUMMY_SCHEMA", sql_text)
+    sql_text = re.sub(r"\$\{[^}]+\}", "DUMMY_SCHEMA", sql_text)
+    # Remove remaining square brackets
+    sql_text = re.sub(r"\[|\]", "", sql_text)
+    return sql_text
