@@ -510,7 +510,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 
                 # tables from SQL -> TABLE
                 tables=extract_tables_from_sql(sql_text)
-                table_csv=", ".join(tables) if tables else "SQL_TEXT"
+                table_csv=", ".join(sorted(tables)) if tables else " "
 
                 # datastore: read the real database_datastore from ancestors (fallback to DS_SQL)
                 ds_for_sql=""
@@ -520,7 +520,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                             ds_for_sql=(getattr(ch, "attrib", {}).get("value") or "").strip()
                             if ds_for_sql: break
                     if ds_for_sql: break
-                ds_for_sql = ds_for_sql or "DS_SQL"
+                ds_for_sql = ds_for_sql or " "
 
                 # remember pretty names
                 remember_display(ds_for_sql, disp_name, table_csv)
