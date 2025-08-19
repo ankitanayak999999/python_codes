@@ -288,6 +288,23 @@ def find_ui_display_name(e, pm):
 
 # -------------------- SQL helpers --------------------
 
+def clean_sql(sql_text: str) -> str:
+    # Replace parameterized schema like ${G_Schema} or [${G_Schema}]
+    sql_text = re.sub(r"\$\{[^}]+\}", "DUMMY_SCHEMA", sql_text)
+    sql_text = re.sub(r"\[\$\{[^}]+\}\]", "DUMMY_SCHEMA", sql_text)
+
+    # Remove remaining square brackets
+    sql_text = re.sub(r"[\[\]]", "", sql_text)
+
+    # Remove single-line comments (-- ...)
+    sql_text = re.sub(r"--.*?$", "", sql_text, flags=re.MULTILINE)
+
+    # Remove multi-line comments (/* ... */)
+    sql_text = re.sub(r"/\*.*?\*/", "", sql_text, flags=re.DOTALL)
+
+    # Strip extra whitespace
+    sql_text = sql_text.strip()
+    return sql_text
 
 def extract_tables_from_sql(sql_text: str):
     """
@@ -509,8 +526,9 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 disp_name = find_ui_display_name(e, pm)
 
                 # tables from SQL -> TABLE
-                tables=extract_tables_from_sql(sql_text)
-                table_csv=", ".join(sorted(tables)) if tables else ""
+                sql_text_clean=clean_sql(sql_text)
+                tables=extract_tables_from_sql(sql_text_clean)
+                table_csv=", ".join(sorted(tables)) if tables else "NO_SCHEMA.NO_TABLE"
 
                 # datastore: read the real database_datastore from ancestors (fallback to DS_SQL)
                 ds_for_sql=""
@@ -520,7 +538,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                             ds_for_sql=(getattr(ch, "attrib", {}).get("value") or "").strip()
                             if ds_for_sql: break
                     if ds_for_sql: break
-                ds_for_sql = ds_for_sql or ""
+                ds_for_sql = ds_for_sql or "NO_DS"
 
                 # remember pretty names
                 remember_display(ds_for_sql, disp_name, table_csv)
