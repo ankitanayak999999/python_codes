@@ -5,10 +5,6 @@ import re
 from collections import defaultdict, namedtuple
 import pandas as pd
 from lxml import etree as ET
-import sqlglot
-import os
-import glob
-import datetime
 
 # -------------------- small utils --------------------
 
@@ -87,6 +83,7 @@ Record = namedtuple(
         "datastore","schema","table",
         "transformation_position","transformation_usage_count",
         "custom_sql_text","source_line",
+        "physical_filename",  # NEW: for FILE/EXCEL sources/targets; blank otherwise
     ],
 )
 
@@ -246,13 +243,8 @@ def in_dataflow(e, pm):
             return True
     return False
 
-# -------- NEW: robust UI display name finder for custom SQL --------
+# -------- UI display name finder for custom SQL --------
 def find_ui_display_name(e, pm):
-    """
-    Prefer the nearest DISchema's UI display name; fall back to DISchema name;
-    finally scan higher ancestors for UI display attributes.
-    """
-    # 1) nearest DISchema
     nearest_schema = None
     for up in ancestors(e, pm, 400):
         if lower(strip_ns(getattr(up, "tag", ""))) == "dischema":
@@ -273,12 +265,10 @@ def find_ui_display_name(e, pm):
         v = find_ui_in(nearest_schema)
         if v:
             return v
-        # fallback to schema tag name
         v = (attrs_ci(nearest_schema).get("name") or "").strip()
         if v:
             return v
 
-    # 2) last resort: search broader ancestors for the attribute
     for up in ancestors(e, pm, 400):
         v = find_ui_in(up)
         if v:
@@ -288,57 +278,16 @@ def find_ui_display_name(e, pm):
 
 # -------------------- SQL helpers --------------------
 
+SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
 
 def extract_tables_from_sql(sql_text: str):
-    """
-    Robust table extractor using sqlglot. Falls back to the original regex
-    if parsing fails. Returns deduped list of table names, preserving
-    schema.table when available.
-    """
-    if not sql_text:
-        return []
-    try:
-        # Parse the SQL text (handles multi-statement strings)
-        expressions = sqlglot.parse(sql_text)
-        tables = set()
-
-        # Collect CTE names to avoid counting them as physical tables
-        cte_names = set()
-        for expr in expressions:
-            for cte in expr.find_all(sqlglot.exp.CTE):
-                alias = cte.args.get("alias")
-                if isinstance(alias, sqlglot.exp.TableAlias):
-                    if alias.name:
-                        cte_names.add(alias.name.upper())
-
-        # Walk the AST and grab all Table nodes
-        for expr in expressions:
-            for t in expr.find_all(sqlglot.exp.Table):
-                # Skip references that are actually CTE aliases
-                t_name = t.name  # unquoted table identifier
-                t_db   = t.args.get("db") or ""  # schema / database
-                if not t_db and t_name and t_name.upper() in cte_names:
-                    continue
-
-                if t_db:
-                    tables.add(f"{t_db}.{t_name}")
-                else:
-                    tables.add(t_name)
-
-        return dedupe(list(tables))
-
-    except Exception:
-        # Parser couldn’t handle it -> fallback to your proven regex logic
-        return extract_tables_from_sql_regex(sql_text)
-
-SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
-def extract_tables_from_sql_regex(sql_text: str):
-    c = " ".join(sql_text.replace("\n", " ").replace("\r", " ").split())
+    if not sql_text: return []
+    c = " ".join(sql_text.replace("\n"," ").replace("\r"," ").split())
     hits = SQL_FROM_JOIN_RE.findall(c)
-    tables = []
+    tables=[]
     for h in hits:
-        parts = h.split(".")
-        if len(parts) >= 2:
+        parts=h.split(".")
+        if len(parts)>=2:
             tables.append(f"{parts[-2]}.{parts[-1]}")
         else:
             tables.append(parts[-1])
@@ -366,8 +315,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         k=(_norm_key(ds), _norm_key(sch), _norm_key(tbl))
         display_ds[k].add(ds); display_sch[k].add(sch); display_tbl[k].add(tbl)
 
-    # NOTE: now include source_line with each collected item
-    source_target  = set()  # (proj,job,df,role,dsN,schN,tblN, line)
+    # include source_line & physical_filename with collected items
+    source_target  = set()  # (proj,job,df,role,dsN,schN,tblN,line,physical_filename)
     sql_rows       = []
     lookup_pos     = defaultdict(lambda: defaultdict(set))   # key -> pos -> {call_lines}
     lookup_ext_pos = defaultdict(lambda: defaultdict(set))   # key -> pos -> {call_lines}
@@ -401,7 +350,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             if sep in s: s=s.split(sep)[-1]
         return re.sub(r'[^A-Z0-9]','',s.upper())
 
-    # collect lookup calls inside function definitions (for later attribution)
+    # collect lookup calls inside function definitions
     fn_lookup_calls = defaultdict(list)   # canon(func) -> list of (role, ds, sch, tbl)
     for node in root.iter():
         t=lower(strip_ns(getattr(node,"tag","")))
@@ -436,7 +385,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         if tag=="dischema":
             cur_schema=(a.get("name") or a.get("displayname") or cur_schema).strip()
 
-        # 1) DB sources/targets (only if inside DF) — now with source_line
+        # 1) DB sources/targets (in DF)
         if tag in ("didatabasetablesource","didatabasetabletarget") and in_dataflow(e, pm):
             proj,job,df=context_for(e)
             role="source" if "source" in tag else "target"
@@ -445,23 +394,51 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             tbl=(a.get("tablename") or a.get("table") or "").strip()
             if ds and tbl:
                 remember_display(ds,sch,tbl)
-                key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e))
+                key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e), "")
                 source_target.add(key)
 
-        # 2) FILE sources/targets (only if inside DF) — now with source_line
-        if tag in ("difilesource","difiletarget") and in_dataflow(e, pm):
-            proj,job,df=context_for(e)
-            role="source" if "source" in tag else "target"
-            fmt=(a.get("formatname") or "").strip()
-            fname=(a.get("filename") or a.get("name") or "").strip()
-            ds=(a.get("datastorename") or a.get("datastore") or "FILE").strip() or "FILE"
-            sch=fmt or "FILE"
-            tbl=fname or "FILE_OBJECT"
+        # 2) FILE / EXCEL sources/targets (in DF)
+        if tag in ("difilesource","difiletarget","diexcelsource","diexceltarget") and in_dataflow(e, pm):
+            proj,job,df = context_for(e)
+            role = "source" if ("source" in tag) else "target"
+            fmt  = (a.get("formatname") or a.get("file_format") or "").strip()
+
+            # prefer DIOutputView name for "table"
+            outview_name = ""
+            for ch in e.iter():
+                if lower(strip_ns(getattr(ch, "tag", ""))) in ("dioutputview","outputview"):
+                    outview_name = (attrs_ci(ch).get("name") or "").strip()
+                    if outview_name:
+                        break
+
+            # physical file name (NEW)
+            physical_filename = (
+                a.get("filename") or a.get("file") or a.get("path") or ""
+            ).strip()
+
+            fname = (
+                a.get("filename")     or
+                a.get("name")         or
+                a.get("datasetname")  or
+                ""
+            ).strip()
+            if outview_name:
+                fname = fname or outview_name  # prefer logical name when present
+
+            if tag in ("diexcelsource","diexceltarget"):
+                ds  = (a.get("datastorename") or a.get("datastore") or "EXCEL").strip()
+                sch = (fmt or "EXCEL")
+                tbl = (fname or "EXCEL_OBJECT")
+            else:
+                ds  = (a.get("datastorename") or a.get("datastore") or "FILE").strip() or "FILE"
+                sch = (fmt or "FILE")
+                tbl = (fname or "FILE_OBJECT")
+
             remember_display(ds,sch,tbl)
-            key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e))
+            key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e), physical_filename)
             source_target.add(key)
 
-        # 3) CUSTOM SQL (inside DF)
+        # 3) CUSTOM SQL (inside DF) — schema & position use UI display name
         if tag in ("sqltext","sqltexts","diquery","ditransformcall") and in_dataflow(e, pm):
             sql_text=""
             if tag in ("sqltext","sqltexts"):
@@ -473,15 +450,9 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         if sql_text: break
             if sql_text:
                 proj,job,df=context_for(e)
-
-                # NEW: robust UI display name -> goes to SCHEMA
                 disp_name = find_ui_display_name(e, pm)
-
-                # tables from SQL -> TABLE
                 tables=extract_tables_from_sql(sql_text)
                 table_csv=", ".join(tables) if tables else "SQL_TEXT"
-
-                # datastore: read the real database_datastore from ancestors (fallback to DS_SQL)
                 ds_for_sql=""
                 for up in ancestors(e, pm, 12):
                     for ch in up.iter():
@@ -490,23 +461,20 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                             if ds_for_sql: break
                     if ds_for_sql: break
                 ds_for_sql = ds_for_sql or "DS_SQL"
-
-                # remember pretty names
                 remember_display(ds_for_sql, disp_name, table_csv)
-
-                # transformation_position must be blank for custom SQL
                 sql_rows.append(Record(
                     proj,job,df,"custom_sql",
-                    ds_for_sql,           # datastore
-                    disp_name,            # schema (UI display name)
-                    table_csv,            # table (comma-separated tables)
-                    disp_name,                   # transformation_position BLANK
+                    ds_for_sql,            # datastore
+                    disp_name,             # schema = UI display name
+                    table_csv,             # table list
+                    disp_name,             # transformation_position = UI display name
                     len(tables),
                     '"' + (sql_text.replace('"','""')) + '"',
                     line_no(e),
+                    "",                    # physical_filename blank for non-file rows
                 ))
 
-        # 4) LOOKUPS — FUNCTION_CALL inside DF (unchanged from your v12)
+        # 4) LOOKUPS — FUNCTION_CALL inside DF
         if tag=="function_call" and in_dataflow(e, pm):
             proj,job,df = context_for(e)
             an  = attrs_ci(e)
@@ -534,7 +502,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 missing_lookup.append(Record(
                     proj, job, df, role,
                     ds or "<missing>", sch or "<missing>", tbl or "<missing>",
-                    pos, 1, "", ln
+                    pos, 1, "", ln, ""
                 ))
             else:
                 remember_display(ds, sch, tbl)
@@ -544,7 +512,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 else:
                     lookup_pos[key][pos].add(ln)
 
-    # 5) expand external function lookups ONLY for DFs that actually call them
+    # expand external function lookups ONLY for DFs that call them
     for df_name, fn_map in df_func_callsites.items():
         proj,job = df_context.get(df_name, ("",""))
         if not proj:
@@ -553,7 +521,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             proj = job_to_project.get(job, "") or df_to_project.get(df_name, "")
         for fn_key, callsites in fn_map.items():
             payloads = fn_lookup_calls.get(fn_key, [])
-            if not payloads:  # function doesn't contain lookups; skip
+            if not payloads:
                 continue
             for role, ds, sch, tbl in payloads:
                 if not (ds and tbl):
@@ -561,7 +529,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                         missing_lookup.append(Record(
                             proj, job, df_name, role,
                             ds or "<missing>", sch or "<missing>", tbl or "<missing>",
-                            pos, 1, "", ln_call
+                            pos, 1, "", ln_call, ""
                         ))
                     continue
                 remember_display(ds, sch, tbl)
@@ -587,7 +555,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             lines.extend(sorted(lnset))
         positions = sorted(dedupe(positions))
         rows.append(Record(proj, job, df, "lookup", dsD, schD, tblD,
-                           ", ".join(positions), len(positions), "", min(lines) if lines else -1))
+                           ", ".join(positions), len(positions), "", min(lines) if lines else -1, ""))
 
     for (proj,job,df,dsN,schN,tblN), posmap in lookup_ext_pos.items():
         dsD,schD,tblD=nice_names(dsN,schN,tblN)
@@ -597,14 +565,14 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
             lines.extend(sorted(lnset))
         positions = sorted(dedupe(positions))
         rows.append(Record(proj, job, df, "lookup_ext", dsD, schD, tblD,
-                           ", ".join(positions), len(positions), "", min(lines) if lines else -1))
+                           ", ".join(positions), len(positions), "", min(lines) if lines else -1, ""))
 
     rows.extend(missing_lookup)
 
-    # include source_line from source/target tuples
-    for (proj,job,df,role,dsN,schN,tblN,ln) in sorted(source_target):
+    # include source_line & physical_filename from source/target tuples
+    for (proj,job,df,role,dsN,schN,tblN,ln,phys) in sorted(source_target):
         dsD,schD,tblD=nice_names(dsN,schN,tblN)
-        rows.append(Record(proj, job, df, role, dsD, schD, tblD, "", 0, "", ln))
+        rows.append(Record(proj, job, df, role, dsD, schD, tblD, "", 0, "", ln, phys))
 
     rows.extend(sql_rows)
 
@@ -620,6 +588,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 
     df["project_name"] = df.apply(fill_proj, axis=1)
 
+    # strict de-dup key (unchanged)
     def nkey(r):
         return (
             r["project_name"], r["job_name"], r["dataflow_name"], r["role"],
@@ -633,12 +602,13 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
              "datastore","schema","table","custom_sql_text","transformation_position"],
             dropna=False, as_index=False)
          .agg({"transformation_usage_count": "sum",
-               "source_line": lambda x:", ".join(str(i) for i in sorted(set(x)))
+               "source_line": lambda x:", ".join(str(i) for i in sorted(set(x))),
+               "physical_filename": lambda x: ", ".join(dedupe([str(i) for i in x if str(i)]))
               }))
 
     df=df.drop(columns=["__k__"])
 
-    for c in ("datastore","schema","table","custom_sql_text","transformation_position"):
+    for c in ("datastore","schema","table","custom_sql_text","transformation_position","physical_filename"):
         df[c]=df[c].map(_pretty)
 
     df=df.sort_values(by=[
@@ -649,45 +619,34 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
 # -------------------- main --------------------
 
 def main():
-    current_time = datetime.datetime.now()
-    timestamp = current_time.strftime("%Y%m%d_%H%M%S")
-
     # keep your paths here
-    path=r"C:\\Users\\raksahu\\Downloads\\python\\input\\sap_ds_xml_files"
-    single_file = f"{path}\\export_af.xml"
-    all_files = glob.glob(os.path.join(path, "*.xml"))
-    if single_file in all_files:
-        all_files = [single_file]
+    xml_path = r"C:\Users\raksahu\Downloads\python\input\export_afs.xml"
+    out_xlsx = r"C:\Users\raksahu\Downloads\python\input\output_v15_plus.xlsx"
 
-    print(f"total number of files present in the path ({len(all_files)})")
-    print(all_files)
+    df = parse_single_xml(xml_path)
 
-    df_list = []
-    for file in all_files:
-        print(f'---{file}')
-        df = parse_single_xml(file)
-        df_list.append(df)
-
-    final_df = pd.concat(df_list, ignore_index=True)
-
-    output_columns = [
-        'PROJECT_NAME', 'JOB_NAME', 'DATAFLOW_NAME', 'TRANFORMATION_TYPE', 'DATA_STORE',
-        'SCHEMA_NAME', 'TABLE_NAME', 'TRANSFORMATION_POSITION',
-        'TRANSFORMATION_USAGE_COUNT', 'CUSTOM_SQL_TEXT', 'SOURCE_LINE'
+    # enforce column order & presence
+    cols = [
+        "project_name","job_name","dataflow_name","role",
+        "datastore","schema","table",
+        "transformation_position","transformation_usage_count",
+        "custom_sql_text","source_line","physical_filename",
     ]
+    for c in cols:
+        if c not in df.columns:
+            df[c] = ""
 
-    final_df.columns = output_columns
+    # key at the end (first 7 columns)
+    key_cols = ["project_name","job_name","dataflow_name","role","datastore","schema","table"]
+    df["key"] = df[key_cols].astype(str).agg("||".join, axis=1)
 
-    # keep your key at the end (first 7 columns)
-    key_cols = ["PROJECT_NAME", "JOB_NAME", "DATAFLOW_NAME", "TRANFORMATION_TYPE", "DATA_STORE", "SCHEMA_NAME", "TABLE_NAME"]
-    final_df["RECORD_KEY"] = final_df[key_cols].astype(str).agg("||".join, axis=1)
+    export_cols = cols + ["key"]
+    df = df[export_cols]
 
-    output_path = f"{path}\\afs_15_{timestamp}.csv"
-    final_df.to_csv(output_path, index=False)
-    print(f"Done. Wrote:{output_path} | Rows: {len(final_df)}")
+    with pd.ExcelWriter(out_xlsx, engine="openpyxl") as xw:
+        df.to_excel(xw, index=False, sheet_name="lineage")
 
+    print(f"Done. Wrote: {out_xlsx}  |  Rows: {len(df)}")
 
 if __name__ == "__main__":
-    print("**** Process started at:", datetime.datetime.now())
     main()
-    print("**** Process completed at:", datetime.datetime.now())
