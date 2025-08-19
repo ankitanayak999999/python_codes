@@ -448,17 +448,48 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
                 key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e))
                 source_target.add(key)
 
-        # 2) FILE sources/targets (only if inside DF) — now with source_line
-        if tag in ("difilesource","difiletarget") and in_dataflow(e, pm):
-            proj,job,df=context_for(e)
-            role="source" if "source" in tag else "target"
-            fmt=(a.get("formatname") or "").strip()
-            fname=(a.get("filename") or a.get("name") or "").strip()
-            ds=(a.get("datastorename") or a.get("datastore") or "FILE").strip() or "FILE"
-            sch=fmt or "FILE"
-            tbl=fname or "FILE_OBJECT"
-            remember_display(ds,sch,tbl)
-            key=(proj,job,df,role,_norm_key(ds),_norm_key(sch),_norm_key(tbl), line_no(e))
+        # 2) FILE / EXCEL sources/targets (only if inside DF) — now with source_line
+        if tag in ("difilesource","difiletarget","diexcelsource","diexceltarget") and in_dataflow(e, pm):
+            proj,job,df = context_for(e)
+        
+            # role from tag (Excel "source" should always be source)
+            role = "source" if ("source" in tag) else "target"
+        
+            a = attrs_ci(e)
+        
+            # Try to capture some notion of format
+            fmt = (a.get("formatname") or a.get("file_format") or "").strip()
+        
+            # Prefer inner DIOutputView name (often the sheet/logical name) for "table"
+            outview_name = ""
+            for ch in e.iter():
+                if lower(strip_ns(getattr(ch, "tag", ""))) in ("dioutputview","outputview"):
+                    outview_name = (attrs_ci(ch).get("name") or "").strip()
+                    if outview_name:
+                        break
+        
+            # Filename / dataset name / element name
+            fname = (
+                a.get("filename")     or
+                a.get("name")         or
+                a.get("datasetname")  or
+                ""
+            ).strip()
+            if outview_name:
+                # if we found a nicer logical name, prefer it
+                fname = fname or outview_name
+        
+            if tag in ("diexcelsource","diexceltarget"):
+                ds  = (a.get("datastorename") or a.get("datastore") or "EXCEL").strip()
+                sch = (fmt or "EXCEL")
+                tbl = (fname or "EXCEL_OBJECT")
+            else:
+                ds  = (a.get("datastorename") or a.get("datastore") or "FILE").strip() or "FILE"
+                sch = (fmt or "FILE")
+                tbl = (fname or "FILE_OBJECT")
+        
+            remember_display(ds, sch, tbl)
+            key = (proj, job, df, role, _norm_key(ds), _norm_key(sch), _norm_key(tbl), line_no(e))
             source_target.add(key)
 
         # 3) CUSTOM SQL (inside DF)
