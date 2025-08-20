@@ -353,8 +353,8 @@ def extract_tables_from_sql(sql_text: str):
         table_list=extract_tables_from_sql_regex(sql_text)
         return table_list
 
-SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
 def extract_tables_from_sql_regex(sql_text: str):
+    SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
     c = " ".join(sql_text.replace("\n", " ").replace("\r", " ").split())
     hits = SQL_FROM_JOIN_RE.findall(c)
     tables = []
