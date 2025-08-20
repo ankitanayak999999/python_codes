@@ -344,8 +344,9 @@ def extract_tables_from_sql(sql_text: str):
                     tables.add(f"{t_db}.{t_name}")
                 else:
                     tables.add(t_name)
-        table_list=dedupe(list(tables))
-        if (not table_list or any(t.endswith('.')) for t in table_list):raise ValueError('Invalid Table')
+        table_list=[t.strip() for t in tables if t.strip() !='']
+        table_list=dedupe(table_list)
+        if not table_list or any(t.endswith('.') for t in table_list):raise ValueError('Invalid Table')
         return table_list
 
     except Exception:
