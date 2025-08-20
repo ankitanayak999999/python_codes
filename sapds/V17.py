@@ -302,6 +302,9 @@ def clean_sql(sql_text: str) -> str:
     # Remove multi-line comments (/* ... */)
     sql_text = re.sub(r"/\*.*?\*/", "", sql_text, flags=re.DOTALL)
 
+    # Collapse all newlines / tabs into a single space
+    sql_text = re.sub(r"\s+", " ", sql_text).strip()
+
     # Strip extra whitespace
     sql_text = sql_text.strip()
     return sql_text
