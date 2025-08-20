@@ -344,12 +344,14 @@ def extract_tables_from_sql(sql_text: str):
                     tables.add(f"{t_db}.{t_name}")
                 else:
                     tables.add(t_name)
-
-        return dedupe(list(tables))
+        table_list=dedupe(list(tables))
+        if (not table_list or any(t.endswith('.'))):raise ValueError('Invalid Table')
+        return table_list
 
     except Exception:
         # Parser couldn’t handle it -> fallback to your proven regex logic
-        return extract_tables_from_sql_regex(sql_text)
+        table_list=extract_tables_from_sql_regex(sql_text)
+        return table_list
 
 SQL_FROM_JOIN_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z0-9_\.\$#@]+)", re.I)
 def extract_tables_from_sql_regex(sql_text: str):
