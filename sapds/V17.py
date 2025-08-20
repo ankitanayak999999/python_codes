@@ -349,12 +349,12 @@ def extract_tables_from_sql(sql_text: str):
         if not table_list or any(t.endswith('.') for t in table_list):
             print('***************************************************')
             print(f'table names are :{table_list}')
-            print(f'sql is : {sql_test}')
+            print(f'sql is : {sql_text}')
             raise ValueError('Invalid Table')
         return table_list
 
     except Exception:
-        # Parser couldn’t handle it -> fallback to your proven regex logic
+        # Parser couldn’t handle it -> fallback to your proven regex
         table_list=extract_tables_from_sql_regex(sql_text)
         return table_list
 
