@@ -217,6 +217,7 @@ def extract_ditable_catalog(root):
 # ======================================================================
 # 2) PER‑DF SOURCE/TARGET REFERENCES (DB / FILE / EXCEL)
 # ======================================================================
+
 def collect_source_target_refs(root):
     """
     Walks the tree and collects any Source/Target nodes, with DF & Schema context.
@@ -275,6 +276,7 @@ def _extract_source_columns(mapping_text: str) -> str:
 # ======================================================================
 # 3) HELPERS TO EMIT ROWS (each can be toggled independently)
 # ======================================================================
+
 def collect_transform_rows(root, pm, context_for, rows):
     """Append TRANSFORM rows from DIElement (inside a DF)."""
     for e in root.iter():
@@ -367,6 +369,7 @@ def collect_file_excel_st_rows(root, df_to_job, job_to_project, df_to_project, r
 # ======================================================================
 # 4) MAIN PARSER
 # ======================================================================
+
 def parse_single_xml(xml_path: str) -> pd.DataFrame:
     parser = ET.XMLParser(huge_tree=True, recover=True)
     root   = ET.parse(xml_path, parser=parser).getroot()
