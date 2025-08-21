@@ -511,33 +511,63 @@ def parse_mapping_texts(xml_path: str) -> pd.DataFrame:
 
 # ---------- folder runner (kept similar to your v16 main) ----------
 def main():
-    # 1) Point to a single file or a folder of *.xml
+    now = datetime.datetime.now()
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+
+    # keep your paths here
     path = r"C:\Users\raksahu\Downloads\python\input\sap_ds_xml_files"
-    single_file = f"{path}\\export_df.xml"   # <- if this exists, we use only this file
-    files = list(Path(path).glob("*.xml"))
-    if Path(single_file).exists():
-        files = [Path(single_file)]
+    single_file = fr"{path}\export_af.xml"  # optional pin
 
-    print(f"Total XML files found: {len(files)}")
+    all_files = glob.glob(os.path.join(path, "*.xml"))
+    if single_file in all_files:
+        all_files = [single_file]
 
-    all_df = []
-    for i, fp in enumerate(files, 1):
-        print(f"[{i}/{len(files)}] parsing: {fp}")
-        df = parse_mapping_texts(str(fp))
-        if not df.empty:
-            all_df.append(df)
+    print(f"total number of files present in the path ({len(all_files)})")
+    print(all_files)
 
-    if not all_df:
-        print("No mapping rows found.")
-        return
+    out_frames = []
+    for i, file in enumerate(all_files):
+        print(f"Row Number:{i}--{file}")
+        out_frames.append(parse_single_xml(file))
 
-    out = pd.concat(all_df, ignore_index=True)
+    final_df = pd.concat(out_frames, ignore_index=True)
 
-    # Output CSV with timestamp (no special quoting; Excel will still open fine)
-    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = Path(path) / f"SAP_DS_MAPPING_TEXTS_{ts}.csv"
-    out.to_csv(out_path, index=False)
-    print(f"Done. Wrote: {out_path}  |  Rows: {len(out)}")
+    # Keep the same column names; this mapping is identity but shows intent
+    rename_mapping = {
+        'PROJECT_NAME'        : 'PROJECT_NAME',
+        'JOB_NAME'            : 'JOB_NAME',
+        'DATAFLOW_NAME'       : 'DATAFLOW_NAME',
+        'TRANSFORMATION_NAME' : 'TRANSFORMATION_NAME',
+        'TRANSFORMATION_TYPE' : 'TRANSFORMATION_TYPE',
+        'COLUMN_NAME'         : 'COLUMN_NAME',
+        'MAPPING_TEXT'        : 'MAPPING_TEXT',
+    }
+    final_df = final_df.rename(columns=rename_mapping)[list(rename_mapping.values())]
+
+    # ----- key + duplicates snapshot (as in your screenshot) -----
+    key_cols = ["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANSFORMATION_NAME","COLUMN_NAME"]
+    final_df["RECORD_KEY"] = final_df[key_cols].astype(str).agg("||".join, axis=1)
+
+    dups_df = final_df[final_df.duplicated(subset=["RECORD_KEY"], keep=False)].copy()
+    if not dups_df.empty:
+        dups_df["DUP_GROUP"] = dups_df.groupby("RECORD_KEY").ngroup() + 1
+        dups_df["DUP_COUNT"] = dups_df.groupby("RECORD_KEY")["RECORD_KEY"].transform("count")
+    else:
+        dups_df["DUP_GROUP"] = []
+        dups_df["DUP_COUNT"] = []
+
+    # keep first per RECORD_KEY
+    final_df = final_df.drop_duplicates(subset="RECORD_KEY", keep="first").reset_index(drop=True)
+
+    # ----- outputs (same naming pattern as your example) -----
+    output_path = fr"{path}\SAP_DS_ALL_TABLE_MAPPING_{timestamp}.csv"
+    dups_path   = fr"{path}\SAP_DS_TABLE_MAPPING_DUPLICATES_{timestamp}.csv"
+
+    final_df.to_csv(output_path, index=False, encoding="utf-8-sig")
+    dups_df.to_csv(dups_path, index=False, encoding="utf-8-sig")
+
+    print(f"Done. Wrote: {output_path} | Rows: {len(final_df)}")
+    print(f"Number of duplicate records: {len(dups_df)}")
 
 if __name__ == "__main__":
     main()
