@@ -465,7 +465,7 @@ def main():
     final_df = final_df.rename(columns=rename_mapping)[list(rename_mapping.values())]
 
     # RECORD_KEY for duplicate snapshot (same structure you showed)
-    key_cols = ["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANSFORMATION_NAME","COLUMN_NAME"]
+    key_cols = ["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANSFORMATION_NAME","TARGET_COLUMN"]
     final_df["RECORD_KEY"] = final_df[key_cols].astype(str).agg("|".join, axis=1)
 
     dups_df = final_df[final_df.duplicated(subset=["RECORD_KEY"], keep=False)].copy()
