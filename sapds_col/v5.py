@@ -263,6 +263,21 @@ def collect_source_target_refs(root):
             "tableC": _canon(a.get("tablename") or a.get("table") or a.get("name") or ""),
         })
     return refs
+#helper to extract source columns from mapping text
+ def _extract_source_columns(mapping_text: str) -> str:
+    if not mapping_text:
+    return ""
+    txt = str(mapping_text)
+    # remove inline tokens starting with '#', e.g. "#NULL" or "#CLM"
+    txt = re.sub(r"#\S+", " ", txt)
+    matches = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b", txt)
+    seen, ordered = set(), []
+    for m in matches:
+    key = m.upper()
+    if key not in seen:
+    seen.add(key)
+    ordered.append(m)
+    return ",".join(ordered)
 
 # ======================================================================
 # 3) HELPERS TO EMIT ROWS (each can be toggled independently)
@@ -289,6 +304,7 @@ def collect_transform_rows(root, pm, context_for, rows):
                 map_txt = html.unescape(map_txt).replace("\r", " ").replace("\n", " ").strip()
 
             transform = nearest_schema_name(e, pm)
+            src_cols=_extract_source_columns(map_txt)
 
             # ---------- TRANSFORMATION ROW ----------
             row = {
@@ -298,6 +314,7 @@ def collect_transform_rows(root, pm, context_for, rows):
                 "TRANSFORMATION_NAME": transform,
                 "TRANSFORMATION_TYPE": "TRANSFORM",      # TRANSFORMATION append
                 "TARGET_COLUMN": col_name,
+                "SOURCE_COLUMNS":src_cols,
                 "MAPPING_TEXT": map_txt,
             }
             emit(rows, **row)  # append TRANSFORM row
@@ -326,6 +343,7 @@ def collect_db_st_rows(root, df_to_job, job_to_project, df_to_project, rows):
                 "TRANSFORMATION_NAME": r["schema"],
                 "TRANSFORMATION_TYPE": r["role"],        # DB SOURCE/TARGET append
                 "TARGET_COLUMN": col,
+                "SOURCE_COLUMNS":"",
                 "MAPPING_TEXT": "",
             }
             emit(rows, **row)  # append DB source/target row
@@ -348,6 +366,7 @@ def collect_file_excel_st_rows(root, df_to_job, job_to_project, df_to_project, r
             "TRANSFORMATION_NAME": r["schema"],
             "TRANSFORMATION_TYPE": r["role"],           # FILE/EXCEL append
             "TARGET_COLUMN": "",
+            "SOURCE_COLUMNS":"",
             "MAPPING_TEXT": "",
         }
         emit(rows, **row)  # append FILE/EXCEL row
@@ -392,7 +411,7 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         df = pd.DataFrame(rows, columns=[
             "PROJECT_NAME","JOB_NAME","DATAFLOW_NAME",
             "TRANSFORMATION_NAME","TRANSFORMATION_TYPE",
-            "TARGET_COLUMN","MAPPING_TEXT"
+            "TARGET_COLUMN","SOURCE_COLUMNS","MAPPING_TEXT"
         ])
         # (no rename here—done in main to keep your pattern)
         df["__k__"] = df.astype(str).agg("||".join, axis=1)
@@ -400,23 +419,8 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         return df
     empty_df=pd.DataFrame(columns=[
         "PROJECT_NAME","JOB_NAME","DATAFLOW_NAME",
-        "TRANSFORMATION_NAME","TRANSFORMATION_TYPE","TARGET_COLUMN","MAPPING_TEXT"])
+        "TRANSFORMATION_NAME","TRANSFORMATION_TYPE","TARGET_COLUMN","SOURCE_COLUMNS","MAPPING_TEXT"])
     return empty_df
-
-def _extract_source_columns(mapping_text: str) -> str:
-    if not mapping_text:
-        return ""
-    txt = str(mapping_text)
-    # remove inline tokens starting with '#', e.g. "#NULL" or "#CLM"
-    txt = re.sub(r"#\S+", " ", txt)
-    matches = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b", txt)
-    seen, ordered = set(), []
-    for m in matches:
-        key = m.upper()
-        if key not in seen:
-            seen.add(key)
-            ordered.append(m)
-    return ",".join(ordered)
 
 
 # ======================================================================
@@ -444,14 +448,7 @@ def main():
 
     final_df = pd.concat(out_frames, ignore_index=True)
 
-    # ---------------- NEW: add SOURCE_COLUMNS + rename COLUMN_NAME -> TARGET_COLUMN ----------------
-    # Build SOURCE_COLUMNS from MAPPING_TEXT (distinct table.column; ignore tokens that start with '#')
-    final_df["SOURCE_COLUMNS"] = final_df["MAPPING_TEXT"].apply(_extract_source_columns)
-
-    # rename COLUMN_NAME -> TARGET_COLUMN (keep your rename_mapping pattern/style)
-    final_df = final_df.rename(columns={"COLUMN_NAME": "TARGET_COLUMN"})
-
-        # (Identity) rename map + column ordering (kept to mirror your pattern)
+    #RENAME 
     rename_mapping = {
         'PROJECT_NAME'       : 'PROJECT_NAME',
         'JOB_NAME'           : 'JOB_NAME',
