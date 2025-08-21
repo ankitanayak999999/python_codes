@@ -257,19 +257,19 @@ def collect_source_target_refs(root):
         })
     return refs
 #helper to extract source columns from mapping text
- def _extract_source_columns(mapping_text: str) -> str:
+def _extract_source_columns(mapping_text: str) -> str:
     if not mapping_text:
-    return ""
+        return ""
     txt = str(mapping_text)
     # remove inline tokens starting with '#', e.g. "#NULL" or "#CLM"
     txt = re.sub(r"#\S+", " ", txt)
     matches = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b", txt)
     seen, ordered = set(), []
     for m in matches:
-    key = m.upper()
-    if key not in seen:
-    seen.add(key)
-    ordered.append(m)
+        key = m.upper()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(m)
     return ",".join(ordered)
 
 # ======================================================================
