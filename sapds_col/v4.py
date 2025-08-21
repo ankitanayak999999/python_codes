@@ -384,41 +384,160 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
     ])
 
 # -------------------- main (v3-style) --------------------
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from pathlib import Path
+from html import unescape
+import datetime as dt
+import pandas as pd
+from lxml import etree as ET
+import re
+
+# ---------- tiny helpers ----------
+def strip_ns(tag): return re.sub(r"^\{.*\}", "", tag) if isinstance(tag, str) else ""
+def lower(s): return (s or "").strip().lower()
+def attrs_ci(e): return {k.lower(): (v or "") for k, v in (getattr(e, "attrib", {}) or {}).items()}
+
+def build_parent_map(root): return {c: p for p in root.iter() for c in p}
+
+def ancestors(e, pm, lim=200):
+    cur = e
+    for _ in range(lim):
+        if cur is None: break
+        yield cur
+        cur = pm.get(cur)
+
+# tags we care about (case/namespace safe)
+DF_TAGS      = ("didataflow","dataflow","dflow")
+JOB_TAGS     = ("dijob","dibatchjob","job","batch_job")
+PROJECT_TAGS = ("diproject","project")
+SCHEMA_TAG   = "dischema"
+DIELEMENT    = "dielement"
+DIATTRIBUTE  = "diattribute"
+
+def _job_name_from_node(job_node):
+    # prefer the explicit job_name attribute if present
+    for ch in job_node.iter():
+        if lower(strip_ns(getattr(ch, "tag", ""))) == DIATTRIBUTE and lower(ch.attrib.get("name","")) == "job_name":
+            v = (ch.attrib.get("value") or "").strip()
+            if v: return v
+    return (job_node.attrib.get("name") or job_node.attrib.get("displayName") or "").strip()
+
+def in_dataflow(node, pm):
+    for a in ancestors(node, pm, 200):
+        if lower(strip_ns(getattr(a, "tag", ""))) in DF_TAGS:
+            return True
+    return False
+
+def nearest_schema_name(node, pm):
+    # Use nearest DISchema's name/displayName as TRANSFORMATION_NAME
+    for a in ancestors(node, pm, 200):
+        if lower(strip_ns(getattr(a, "tag", ""))) == SCHEMA_TAG:
+            at = attrs_ci(a)
+            return (at.get("name") or at.get("displayname") or "").strip()
+    return ""
+
+def context_for(node, pm):
+    """Return (project, job, dataflow) inferred from ancestors."""
+    proj = job = df = ""
+    for a in ancestors(node, pm, 300):
+        t = lower(strip_ns(getattr(a, "tag", "")))
+        at = attrs_ci(a)
+        nm = (at.get("name") or at.get("displayname") or "").strip()
+        if not df and t in DF_TAGS: df = nm or df
+        if t in JOB_TAGS and not job: job = _job_name_from_node(a) or nm or job
+        if t in PROJECT_TAGS and not proj: proj = nm or proj
+    return proj, job, df
+
+# ---------- core extractor ----------
+def parse_mapping_texts(xml_path: str) -> pd.DataFrame:
+    parser = ET.XMLParser(huge_tree=True, recover=True)
+    root   = ET.parse(xml_path, parser=parser).getroot()
+    pm     = build_parent_map(root)
+
+    rows = []
+    for el in root.iter():
+        if lower(strip_ns(getattr(el, "tag", ""))) != DIELEMENT:
+            continue
+
+        # Only consider DIElements that live inside a Dataflow
+        if not in_dataflow(el, pm):
+            continue
+
+        # Column name from DIElement
+        col_name = (attrs_ci(el).get("name") or "").strip()
+        if not col_name:
+            continue
+
+        # Find child DIAttribute name="ui_mapping_text"
+        mapping_text = ""
+        for ch in el.iter():
+            if lower(strip_ns(getattr(ch, "tag", ""))) == DIATTRIBUTE:
+                if lower((getattr(ch, "attrib", {}) or {}).get("name","")) == "ui_mapping_text":
+                    mapping_text = (getattr(ch, "attrib", {}) or {}).get("value", "") or ""
+                    break
+        if not mapping_text:
+            continue
+
+        # Unescape &quot; etc. and trim extra whitespace
+        mapping_text = unescape(mapping_text).strip()
+
+        proj, job, df = context_for(el, pm)
+        xform_name = nearest_schema_name(el, pm)
+
+        rows.append({
+            "PROJECT_NAME": proj,
+            "JOB_NAME": job,
+            "DATAFLOW_NAME": df,
+            "TRANSFORMATION_NAME": xform_name,
+            "COLUMN_NAME": col_name,
+            "MAPPING_TEXT": mapping_text,
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    # Normalize whitespace and drop perfect duplicates
+    for c in ("PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANSFORMATION_NAME","COLUMN_NAME","MAPPING_TEXT"):
+        df[c] = df[c].astype(str).str.replace(r"\s+", " ", regex=True).str.strip()
+
+    df = df.drop_duplicates().sort_values(
+        ["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANSFORMATION_NAME","COLUMN_NAME"]
+    ).reset_index(drop=True)
+
+    return df
+
+# ---------- folder runner (kept similar to your v16 main) ----------
 def main():
-    now = datetime.datetime.now()
-    ts  = now.strftime("%Y%m%d_%H%M%S")
-
+    # 1) Point to a single file or a folder of *.xml
     path = r"C:\Users\raksahu\Downloads\python\input\sap_ds_xml_files"
-    single_file = fr"{path}\export_af.xml"   # optional pin
+    single_file = f"{path}\\export_df.xml"   # <- if this exists, we use only this file
+    files = list(Path(path).glob("*.xml"))
+    if Path(single_file).exists():
+        files = [Path(single_file)]
 
-    all_files = glob.glob(os.path.join(path, "*.xml"))
-    if single_file in all_files:
-        all_files = [single_file]
+    print(f"Total XML files found: {len(files)}")
 
-    print(f"total number of files present in the path ({len(all_files)})")
-    print(all_files)
+    all_df = []
+    for i, fp in enumerate(files, 1):
+        print(f"[{i}/{len(files)}] parsing: {fp}")
+        df = parse_mapping_texts(str(fp))
+        if not df.empty:
+            all_df.append(df)
 
-    frames=[]
-    for i, file in enumerate(all_files):
-        print(f"Row Number:{i}--{file}")
-        frames.append(parse_single_xml(file))
+    if not all_df:
+        print("No mapping rows found.")
+        return
 
-    final_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-        columns=["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME",
-                 "TRANSFORMATION_NAME","TRANSFORMATION_TYPE","COLUMN_NAME","MAPPING_TEXT"]
-    )
+    out = pd.concat(all_df, ignore_index=True)
 
-    out_base = fr"{path}\SAPDS_ALL_COLUMN_MAPPING_{ts}"
-    csv_path = out_base + ".csv"
-    xlsx_path = out_base + ".xlsx"
-
-    final_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    try:
-        final_df.to_excel(xlsx_path, index=False)
-    except Exception as e:
-        print(f"Excel write skipped: {e}")
-
-    print(f"Done. Wrote: {csv_path} | Rows: {len(final_df)}")
+    # Output CSV with timestamp (no special quoting; Excel will still open fine)
+    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = Path(path) / f"SAP_DS_MAPPING_TEXTS_{ts}.csv"
+    out.to_csv(out_path, index=False)
+    print(f"Done. Wrote: {out_path}  |  Rows: {len(out)}")
 
 if __name__ == "__main__":
     main()
