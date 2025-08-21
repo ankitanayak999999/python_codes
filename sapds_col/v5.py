@@ -1,12 +1,5 @@
-# xml_parser_column_v4.py
-# Column-level extractor with:
-#   - TRANSFORM columns from DIElement (with ui_mapping_text)
-#   - DATABASE SOURCE/TARGET columns via global <DITable> catalog (strict 3-key link)
-#   - FILE / EXCEL SOURCE/TARGET stubs (blank COLUMN_NAME)
-# Readable style: build row dict, then emit(rows, **row) on a separate line
-# UPDATE: Adds SOURCE_COLUMNS (distinct table.column from MAPPING_TEXT, ignoring #comments)
-#         Renames COLUMN_NAME -> TARGET_COLUMN
-#         Keeps your main() structure/style intact
+#08/28 - ALL TARNSAFORMATION WORKING FILE ,SOURCE COLUMNS ADDED , SOURCE AND TARGET ROWS ADDED , FILES ROWS ADDED 
+#MISSING TRANSAFORMATION NAME FOR SOURCE ,TARGET ANF FILE ROWS 
 
 import re, os, glob, html, datetime
 import pandas as pd
