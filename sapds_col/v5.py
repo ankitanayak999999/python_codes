@@ -297,7 +297,7 @@ def collect_transform_rows(root, pm, context_for, rows):
                 "DATAFLOW_NAME": df,
                 "TRANSFORMATION_NAME": transform,
                 "TRANSFORMATION_TYPE": "TRANSFORM",      # TRANSFORMATION append
-                "COLUMN_NAME": col_name,
+                "TARGET_COLUMN": col_name,
                 "MAPPING_TEXT": map_txt,
             }
             emit(rows, **row)  # append TRANSFORM row
@@ -325,7 +325,7 @@ def collect_db_st_rows(root, df_to_job, job_to_project, df_to_project, rows):
                 "DATAFLOW_NAME": r["df"],
                 "TRANSFORMATION_NAME": r["schema"],
                 "TRANSFORMATION_TYPE": r["role"],        # DB SOURCE/TARGET append
-                "COLUMN_NAME": col,
+                "TARGET_COLUMN": col,
                 "MAPPING_TEXT": "",
             }
             emit(rows, **row)  # append DB source/target row
@@ -347,7 +347,7 @@ def collect_file_excel_st_rows(root, df_to_job, job_to_project, df_to_project, r
             "DATAFLOW_NAME": r["df"],
             "TRANSFORMATION_NAME": r["schema"],
             "TRANSFORMATION_TYPE": r["role"],           # FILE/EXCEL append
-            "COLUMN_NAME": "",
+            "TARGET_COLUMN": "",
             "MAPPING_TEXT": "",
         }
         emit(rows, **row)  # append FILE/EXCEL row
@@ -392,17 +392,32 @@ def parse_single_xml(xml_path: str) -> pd.DataFrame:
         df = pd.DataFrame(rows, columns=[
             "PROJECT_NAME","JOB_NAME","DATAFLOW_NAME",
             "TRANSFORMATION_NAME","TRANSFORMATION_TYPE",
-            "COLUMN_NAME","MAPPING_TEXT"
+            "TARGET_COLUMN","MAPPING_TEXT"
         ])
         # (no rename here—done in main to keep your pattern)
         df["__k__"] = df.astype(str).agg("||".join, axis=1)
         df = df.drop_duplicates("__k__").drop(columns="__k__").reset_index(drop=True)
         return df
-
-    return pd.DataFrame(columns=[
+    empty_df=pd.DataFrame(columns=[
         "PROJECT_NAME","JOB_NAME","DATAFLOW_NAME",
-        "TRANSFORMATION_NAME","TRANSFORMATION_TYPE","COLUMN_NAME","MAPPING_TEXT"
-    ])
+        "TRANSFORMATION_NAME","TRANSFORMATION_TYPE","TARGET_COLUMN","MAPPING_TEXT"])
+    return empty_df
+
+def _extract_source_columns(mapping_text: str) -> str:
+    if not mapping_text:
+        return ""
+    txt = str(mapping_text)
+    # remove inline tokens starting with '#', e.g. "#NULL" or "#CLM"
+    txt = re.sub(r"#\S+", " ", txt)
+    matches = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b", txt)
+    seen, ordered = set(), []
+    for m in matches:
+        key = m.upper()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(m)
+    return ",".join(ordered)
+
 
 # ======================================================================
 # 5) main()  — SAME LAYOUT AS YOUR V4 (only added new col + rename here)
@@ -431,39 +446,28 @@ def main():
 
     # ---------------- NEW: add SOURCE_COLUMNS + rename COLUMN_NAME -> TARGET_COLUMN ----------------
     # Build SOURCE_COLUMNS from MAPPING_TEXT (distinct table.column; ignore tokens that start with '#')
-    def _extract_source_columns(mapping_text: str) -> str:
-        if not mapping_text:
-            return ""
-        txt = str(mapping_text)
-        # remove inline tokens starting with '#', e.g. "#NULL" or "#CLM"
-        txt = re.sub(r"#\S+", " ", txt)
-        matches = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b", txt)
-        seen, ordered = set(), []
-        for m in matches:
-            key = m.upper()
-            if key not in seen:
-                seen.add(key)
-                ordered.append(m)
-        return ",".join(ordered)
-
     final_df["SOURCE_COLUMNS"] = final_df["MAPPING_TEXT"].apply(_extract_source_columns)
 
     # rename COLUMN_NAME -> TARGET_COLUMN (keep your rename_mapping pattern/style)
     final_df = final_df.rename(columns={"COLUMN_NAME": "TARGET_COLUMN"})
 
-    # enforce column order with SOURCE_COLUMNS before MAPPING_TEXT
-    final_df = final_df[[
-        "PROJECT_NAME","JOB_NAME","DATAFLOW_NAME",
-        "TRANSFORMATION_NAME","TRANSFORMATION_TYPE",
-        "TARGET_COLUMN","SOURCE_COLUMNS","MAPPING_TEXT"
-    ]]
-    # -----------------------------------------------------------------------------------------------
+        # (Identity) rename map + column ordering (kept to mirror your pattern)
+    rename_mapping = {
+        'PROJECT_NAME'       : 'PROJECT_NAME',
+        'JOB_NAME'           : 'JOB_NAME',
+        'DATAFLOW_NAME'      : 'DATAFLOW_NAME',
+        'TRANSFORMATION_NAME': 'TRANSFORMATION_NAME',
+        'TRANSFORMATION_TYPE': 'TRANSFORMATION_TYPE',
+        'TARGET_COLUMN'      : 'TARGET_COLUMN',
+        'SOURCE_COLUMNS'     : 'SOURCE_COLUMNS',
+        'MAPPING_TEXT'       : 'MAPPING_TEXT',
+    }
+    final_df = final_df.rename(columns=rename_mapping)[list(rename_mapping.values())]
 
-    # --- keep your key at the end (uses TARGET_COLUMN now) ---
-    key_cols = ["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANSFORMATION_NAME","TARGET_COLUMN"]
+    # RECORD_KEY for duplicate snapshot (same structure you showed)
+    key_cols = ["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANSFORMATION_NAME","COLUMN_NAME"]
     final_df["RECORD_KEY"] = final_df[key_cols].astype(str).agg("|".join, axis=1)
 
-    # duplicates snapshot (unchanged logic)
     dups_df = final_df[final_df.duplicated(subset=["RECORD_KEY"], keep=False)].copy()
     dups_df["DUP_GROUP"] = dups_df.groupby("RECORD_KEY").ngroup() + 1
     dups_df["DUP_COUNT"] = dups_df.groupby("RECORD_KEY")["RECORD_KEY"].transform("count")
