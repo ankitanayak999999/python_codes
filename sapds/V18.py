@@ -750,7 +750,6 @@ def main():
         'transformation_usage_count' : 'TRANSFORMATION_USAGE_COUNT',
         'source_line'                : 'SOURCE_LINE',
         'custom_sql_text'            : 'CUSTOM_SQL_TEXT',
-        # patch columns:
         'datastore_details'          : 'DATASTORE_DETAILS',
         'sql_pick_method'            : 'SQL_PICK_METHOD',
     }
@@ -758,8 +757,38 @@ def main():
     # keep only these columns, in this order
     final_df = final_df.rename(columns=rename_mapping)[list(rename_mapping.values())]
 
-    # --- compute SQL_LENGTH for dedupe sort
+    # ---- compute SQL_LENGTH for dedupe sort
     final_df["SQL_LENGTH"] = final_df["CUSTOM_SQL_TEXT"].astype(str).apply(len)
 
-    # --- prefer DS_MATCHED for custom_sql keys; otherwise fall back to longest SQL (your v17 behavior)
-    key_cols = ["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANFORMATION_TYPE","DATA_STORE","SCHEMA_NAME","re 
+    # ---- prefer DS_MATCHED for custom_sql keys; otherwise fall back to longest SQL
+    key_cols = ["PROJECT_NAME","JOB_NAME","DATAFLOW_NAME","TRANFORMATION_TYPE","DATA_STORE","SCHEMA_NAME","TABLE_NAME"]
+    final_df["RECORD_KEY"] = final_df[key_cols].astype(str).agg("||".join, axis=1)
+    final_df["SQL_PICK_PRIORITY"] = (final_df["SQL_PICK_METHOD"].eq("DS_MATCHED")).astype(int)
+
+    final_df = final_df.sort_values(
+        ["RECORD_KEY","SQL_PICK_PRIORITY","SQL_LENGTH"],
+        ascending=[True, False, False]
+    )
+
+    # duplicates snapshot (before final de-dupe)
+    dups_df = final_df[final_df.duplicated(subset=["RECORD_KEY"], keep=False)].copy()
+    dups_df["DUP_GROUP"] = dups_df.groupby("RECORD_KEY").ngroup() + 1
+    dups_df["DUP_COUNT"] = dups_df.groupby("RECORD_KEY")["RECORD_KEY"].transform("count")
+
+    # keep first per key (prefers DS match, then longest SQL)
+    final_df = final_df.drop_duplicates(subset="RECORD_KEY", keep="first").reset_index(drop=True)
+
+    output_path = fr"{path}\SAP_DS_ALL_TABLE_MAPPING_{timestamp}.csv"
+    dups_path   = fr"{path}\SAP_DS_TABLE_MAPPING_DUPLICATES_{timestamp}.csv"
+
+    final_df.to_csv(output_path, index=False)
+    dups_df.to_csv(dups_path, index=False)
+
+    print(f"Done. Wrote: {output_path}  |  Rows: {len(final_df)}")
+    print(f"Number of duplicate records: {len(dups_df)}")
+
+
+if __name__ == "__main__":
+    print("**** Process started at:", datetime.datetime.now())
+    main()
+    print("**** Process completed at:", datetime.datetime.now())
