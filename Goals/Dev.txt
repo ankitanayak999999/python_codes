@@ -1,3 +1,5 @@
 This year, I strengthened my skills in Snowflake lineage features, IICS metadata extraction using Python, and SAP DS lineage automation using Python/XML, which helped reduce turnaround time for data analysis and improved transparency of data flows.
 
-Next year, I plan to complete Snowflake Certification, expand automation frameworks for metadata and data quality, and share knowledge through mentoring and documentation to further support governance and faster decision-making
+Next year, I plan to complete Snowflake Certification, expand automation frameworks for metadata and data quality, and share knowledge through mentoring and documentation to further support governance and faster decision-Consistently maintained 100% compliance by recording daily activities and project/non-project hours in Clarity on time.
+	•	Ensured accuracy in time reporting, covering all work hours and aligning with team and organizational expectations.
+	•	This discipline improved transparency and supported proper project tracking and resource planning.
