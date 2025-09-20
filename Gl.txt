@@ -1,0 +1,7 @@
+Reviewed DRDs for KCI, Precision Lender, and RDARR projects in alignment with DEO standards, ensuring compliance and availability for assigned initiatives.
+	•	Reviewed and maintained 125 STTMs in SharePoint across key initiatives — RDARR (23), KCI (13), Precision Lender (60), and EODC (29) — enabling standardized documentation for impact, gap, and lineage analysis.
+	•	Partnered with Business and CDOA teams to perform data mapping, onboarding, lineage reviews, and gap analysis (e.g., ~393 attributes in Precision Lender, ~254 attributes in RDARR) using DEO templates.
+	•	Created data lineage automation projects (Snowflake Lineage, IICS Metadata, SAP Metadata using Python) that significantly reduced overall timelines for data analysis and impact assessments.
+	•	Applied these automation tools to new intake requests such as Salesforce and CNO, accelerating impact analysis and improving efficiency.
+	•	Involved in data product design initiatives with Data Architects and the Chief Data Office, contributing to scalable, compliant, and business-aligned data solutions.
+	•	Leveraged DEO templates and automation to improve delivery efficiency, reduce ambiguity, and ensure traceability across compliance and audit requirements.
