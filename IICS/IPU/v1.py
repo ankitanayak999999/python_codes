@@ -124,8 +124,8 @@ def create_export(input_param_dict, payload):
         time.sleep(interval)
 
 def main_run():
-    username_password_base_url = iics_cred.iics_prd_cred()
-    session_id, serverUrl = login_v3(username_password_base_url['username'], username_password_base_url['password'], username_password_base_url['base_url'])
+    username,password,base_url = iics_cred.iics_prd_cred()
+    session_id, serverUrl = login_v3(username,password,base_url)
 
     startDate = "2025-10-01T00:00:00Z"      # start time from when data needed
     endDate   = "2025-10-02T23:59:59Z"      # End time from when data needed
