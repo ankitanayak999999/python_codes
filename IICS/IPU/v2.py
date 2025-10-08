@@ -55,7 +55,7 @@ def download_export_zip(input_param_dict):
     headers = { "INFA-SESSION-ID": session_id }
     resp = requests.get(download_url, headers=headers, verify=False)
     print(f" API Status Code | Download Status API | {resp.status_code}")
-    output_file = f"{path}\\{timestamp}_ipu_usage.zip"
+    output_file = f"{path}/{timestamp}_ipu_usage.zip"
     with open(output_file, "wb") as f:
         f.write(resp.content)
     print(f"Download Completed , File saved at:{output_file}")
@@ -87,7 +87,7 @@ def download_export_zip(input_param_dict):
         print("No Valid CCS found in Zip folder")
         return
     final_df = pd.concat(dfs, ignore_index=True)
-    excel_file_name = f"{path}\\{timestamp}_ipu_usages.xlsx"
+    excel_file_name = f"{path}/{timestamp}_ipu_usages.xlsx"
     final_df.to_excel(excel_file_name, index=False)
 
 def get_job_id(input_param_dict, payload):
@@ -155,7 +155,7 @@ def main_run():
     jobType = "SUMMARY"                     # "SUMMARY" Aggregated Usages , "ASSET","PROJECT_FOLDER"
     combinedMeterUsage = "FALSE"            # "TRUE" Combine data across meters  "FALSE" seperate rows for meter
     allLinkedOrgs = "TRUE"                  # "TRUE" for all sub org  "FALSE" for only current org
-    path = "C:/Users/rakashu/Downloads/python/json_output"
+    path = "C:/Users/raksahu/Downloads/python/json_output"
 
     export_payload = {
         "startDate": startDate,
