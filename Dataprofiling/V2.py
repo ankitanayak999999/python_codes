@@ -1,0 +1,79 @@
+RETURNS TABLE (
+
+DB_SCH_TABLE VARCHAR,
+DB_NAME VARCHAR,
+SCH_NAME VARCHAR,
+TABLE_NAME VARCHAR,
+COLUMN_NAME VARCHAR,
+DATA_TYPE VARCHAR,
+
+TOTAL_ROWS NUMBER,
+EMPTY_STR_CNT NUMBER,
+EMPTY_STR_PCT FLOAT,
+
+NULL_CNT NUMBER,
+NULL_PCT FLOAT,
+
+ZERO_CNT NUMBER,
+ZERO_PCT FLOAT,
+
+NUMERIC_CNT NUMBER,
+NUMERIC_PCT FLOAT,
+
+NON_NUMERIC_CNT NUMBER,
+NON_NUMERIC_PCT FLOAT,
+
+DATE_CNT NUMBER,
+DATE_PCT FLOAT,
+
+DISTINCT_CNT NUMBER,
+
+MIN_VALUE VARCHAR,
+MAX_VALUE VARCHAR,
+
+STATUS VARCHAR,
+ERROR_MESSAGE VARCHAR,
+
+DL_CREATED_DTTM from snowflake.snowpark.functions import col, current_timestamp
+
+output_df = output_df.select(
+
+col("DB_SCH_TABLE").cast("STRING"),
+col("DB_NAME").cast("STRING"),
+col("SCH_NAME").cast("STRING"),
+col("TABLE_NAME").cast("STRING"),
+col("COLUMN_NAME").cast("STRING"),
+col("DATA_TYPE").cast("STRING"),
+
+col("TOTAL_ROWS").cast("NUMBER"),
+col("EMPTY_STR_CNT").cast("NUMBER"),
+col("EMPTY_STR_PCT").cast("FLOAT"),
+
+col("NULL_CNT").cast("NUMBER"),
+col("NULL_PCT").cast("FLOAT"),
+
+col("ZERO_CNT").cast("NUMBER"),
+col("ZERO_PCT").cast("FLOAT"),
+
+col("NUMERIC_CNT").cast("NUMBER"),
+col("NUMERIC_PCT").cast("FLOAT"),
+
+col("NON_NUMERIC_CNT").cast("NUMBER"),
+col("NON_NUMERIC_PCT").cast("FLOAT"),
+
+col("DATE_CNT").cast("NUMBER"),
+col("DATE_PCT").cast("FLOAT"),
+
+col("DISTINCT_CNT").cast("NUMBER"),
+
+col("MIN_VALUE").cast("STRING"),
+col("MAX_VALUE").cast("STRING"),
+
+col("STATUS").cast("STRING"),
+col("ERROR_MESSAGE").cast("STRING"),
+
+current_timestamp().alias("DL_CREATED_DTTM")
+
+)
+
+
