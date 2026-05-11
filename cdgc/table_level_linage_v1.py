@@ -28,10 +28,8 @@ from common import iics_metadata_cm as cm
 from common.logger_helper import get_logger
 
 # ─── GLOBALS ────────────────────────────────────────────────
-lock          = threading.Lock()
-jwt_lock      = threading.Lock()
-progress_lock = threading.Lock()
-
+lock      = threading.Lock()
+jwt_lock  = threading.Lock()
 headers   = {}
 logger    = None
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -43,10 +41,10 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
 def get_session_id(base_url, user_name, password):
     login_url_v3 = f"{base_url}/saas/public/core/v3/login"
-    headers      = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    _headers     = {'Content-Type': 'application/json', 'Accept': 'application/json'}
     payload      = {"username": user_name, "password": password}
 
-    resp = requests.post(login_url_v3, headers=headers, json=payload, verify=False)
+    resp = requests.post(login_url_v3, headers=_headers, json=payload, verify=False)
     logger.info(f"API Status Code | Login API | {resp.status_code}")
 
     try:
@@ -198,6 +196,43 @@ def parse_hierarchy(asset_id, asset_name, response):
 
 
 # ============================================================
+# PROGRESS TRACKING
+# ============================================================
+
+def log_progress(processed_count, total_assets, success_count, 
+                 failed_count, start_time, last_log_time, log_interval_secs):
+    """Reusable progress logger with ETA"""
+    now          = datetime.now()
+    elapsed_secs = (now - last_log_time).total_seconds()
+
+    if elapsed_secs >= log_interval_secs or processed_count == total_assets:
+        pct            = (processed_count / total_assets) * 100
+        elapsed_total  = (now - start_time).total_seconds()
+        elapsed_mins   = int(elapsed_total // 60)
+        elapsed_secs_r = int(elapsed_total % 60)
+
+        if processed_count > 0 and elapsed_total > 0:
+            rate       = processed_count / elapsed_total
+            remaining  = total_assets - processed_count
+            eta_secs   = remaining / rate if rate > 0 else 0
+            eta_mins   = int(eta_secs // 60)
+            eta_secs_r = int(eta_secs % 60)
+        else:
+            eta_mins   = 0
+            eta_secs_r = 0
+
+        logger.info(
+            f"Progress: {processed_count}/{total_assets} ({pct:.1f}%) | "
+            f"Success: {success_count} | Failed: {failed_count} | "
+            f"Elapsed: {elapsed_mins}m {elapsed_secs_r}s | "
+            f"ETA: {eta_mins}m {eta_secs_r}s"
+        )
+        return now
+
+    return last_log_time
+
+
+# ============================================================
 # PROCESS FUNCTIONS
 # ============================================================
 
@@ -232,6 +267,8 @@ def process_dataset_lineage(row, job_run_config):
 
 def parallel_run_executor(input_data, call_function_name, max_workers, job_run_config):
     """Generic parallel executor - reusable for any parallel run"""
+    log_interval_secs = int(job_run_config['log_interval_secs'])
+
     logger.info(f"Starting parallel execution - Total: {len(input_data)} - Workers: {max_workers} - Function: {call_function_name.__name__}")
 
     table_lineage_data = []
@@ -241,6 +278,8 @@ def parallel_run_executor(input_data, call_function_name, max_workers, job_run_c
     processed_count    = 0
     success_count      = 0
     failed_count       = 0
+    start_time         = datetime.now()
+    last_log_time      = datetime.now()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         if hasattr(input_data, 'iterrows'):
@@ -257,15 +296,25 @@ def parallel_run_executor(input_data, call_function_name, max_workers, job_run_c
                 processed_count += 1
                 success_count   += 1 if not error_rows else 0
                 failed_count    += 1 if error_rows else 0
-                if processed_count % 10 == 0 or processed_count == total_assets:
-                    pct = (processed_count / total_assets) * 100
-                    logger.info(f"Progress: {processed_count}/{total_assets} ({pct:.1f}%) - Success: {success_count} - Failed: {failed_count}")
+                last_log_time    = log_progress(
+                    processed_count, total_assets,
+                    success_count, failed_count,
+                    start_time, last_log_time,
+                    log_interval_secs)
             except Exception as e:
                 logger.error(f"Thread error: {str(e)}")
                 processed_count += 1
                 failed_count    += 1
+                last_log_time    = log_progress(
+                    processed_count, total_assets,
+                    success_count, failed_count,
+                    start_time, last_log_time,
+                    log_interval_secs)
 
-    logger.info(f"Parallel execution completed - Function: {call_function_name.__name__}")
+    total_time = (datetime.now() - start_time).total_seconds()
+    total_mins = int(total_time // 60)
+    total_secs = int(total_time % 60)
+    logger.info(f"Parallel execution completed - Function: {call_function_name.__name__} - Total time: {total_mins}m {total_secs}s")
     return table_lineage_data, column_list_data, error_log_data
 
 
@@ -287,7 +336,7 @@ def run_parallel(df_assets, job_run_config):
 
 def validate_input_file(df):
     """Validate input Excel file"""
-    required_cols = ['ASSET_ID', 'ASSET_NAME']
+    required_cols = ['ASSET_ID', 'ASSET_NAME', 'LINEAGE_REFRESH_FLAG']
 
     for col in required_cols:
         if col not in df.columns:
@@ -301,7 +350,11 @@ def validate_input_file(df):
         logger.warning(f"Duplicates found: {len(dupes)} - Removing...")
         df.drop_duplicates(subset=['ASSET_ID'], inplace=True)
 
-    logger.info(f"Input validated - Total assets: {len(df)}")
+    total_before = len(df)
+    df           = df[df['LINEAGE_REFRESH_FLAG'].str.upper() == 'Y']
+    total_after  = len(df)
+
+    logger.info(f"Input validated - Total: {total_before} - To process (Y): {total_after} - Skipped (N): {total_before - total_after}")
     return df
 
 
@@ -370,20 +423,22 @@ if __name__ == "__main__":
     cdgc_base_url = config["urls"]["cdgc_base_url"]
 
     # ─── JOB CONTROL ──────────────────────────────
-    max_workers      = config["cdgc_job_control"]["max_worker_table"]
-    lineage_distance = config["cdgc_job_control"]["lineage_distance"]
-    timeout_limit    = config["cdgc_job_control"]["timeout_limit"]
+    max_workers       = config["cdgc_job_control"]["max_worker_table"]
+    lineage_distance  = config["cdgc_job_control"]["lineage_distance"]
+    timeout_limit     = config["cdgc_job_control"]["timeout_limit"]
+    log_interval_secs = config["cdgc_job_control"]["log_interval_secs"]
 
     # ─── AUTH ─────────────────────────────────────
     job_run_config = {
-        "iics_base_url"    : iics_base_url,
-        "iics_username"    : iics_username,
-        "iics_password"    : iics_password,
-        "jwt_url"          : jwt_url,
-        "cdgc_base_url"    : cdgc_base_url,
-        "max_workers"      : max_workers,
-        "timeout_limit"    : timeout_limit,
-        "lineage_distance" : lineage_distance
+        "iics_base_url"     : iics_base_url,
+        "iics_username"     : iics_username,
+        "iics_password"     : iics_password,
+        "jwt_url"           : jwt_url,
+        "cdgc_base_url"     : cdgc_base_url,
+        "max_workers"       : max_workers,
+        "timeout_limit"     : timeout_limit,
+        "lineage_distance"  : lineage_distance,
+        "log_interval_secs" : log_interval_secs
     }
 
     refresh_cdgc_api_headers(job_run_config)
@@ -392,7 +447,7 @@ if __name__ == "__main__":
     asset_file = f'{input_path}/cdgc_object_asset_list.xlsx'
     df_assets  = pd.read_excel(asset_file)
     df_assets  = validate_input_file(df_assets)
-    logger.info(f"Total assets: {len(df_assets)}")
+    logger.info(f"Total assets to process: {len(df_assets)}")
 
     # ─── RUN ──────────────────────────────────────
     table_lineage_data, column_list_data, error_log_data = run_parallel(
