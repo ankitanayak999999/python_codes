@@ -24,7 +24,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(base_dir)
-
 from common import iics_metadata_cm as cm
 from common.logger_helper import get_logger
 
@@ -41,111 +40,69 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 # ============================================================
 
 def get_session_id(base_url, user_name, password):
-
     login_url_v3 = f"{base_url}/saas/public/core/v3/login"
-
-    _headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-
-    payload = {"username": user_name, "password": password}
+    _headers     = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    payload      = {"username": user_name, "password": password}
 
     resp = requests.post(login_url_v3, headers=_headers, json=payload, verify=False)
-
     logger.info(f"API Status Code | Login API | {resp.status_code}")
 
     try:
-
         resp.raise_for_status()
-
         data       = resp.json()
         session_id = data['userInfo']['sessionId']
         org_id     = data['userInfo']['orgId']
         server_url = data['products'][0]['baseApiUrl']
-
         logger.debug(f"Login OK | server_url={server_url} | session_id_len={len(session_id)}")
-
         return session_id, server_url, org_id
-
     except Exception:
-
         safe_body = None
-
         try:
             safe_body = json.dumps(resp.json())[:1000]
         except Exception:
             safe_body = resp.text[:1000]
-
         logger.exception(f"Login failed | status={resp.status_code} | body={safe_body}")
-
         raise
 
 
 def get_jwt_token(session_id, jwt_url):
     """Get JWT token using session ID"""
-
     try:
-
         _headers = {
             "cookie"         : f"USER_SESSION={session_id}",
             "IDS-SESSION-ID" : session_id
         }
-
         resp = requests.get(jwt_url, headers=_headers, verify=False, timeout=60)
-
         resp.raise_for_status()
-
         jwt_token = resp.json()["jwt_token"]
-
         logger.info("JWT Token obtained successfully!")
-
         return jwt_token
-
     except Exception as e:
-
         logger.error(f"JWT Token failed: {str(e)}")
-
         raise
 
 
 def refresh_cdgc_api_headers(job_run_config):
-    """Build/Refresh CDGC API headers"""
-
+    """Build/Refresh CDGC API headers - used for initial auth and JWT refresh"""
     global headers
 
     iics_base_url = job_run_config['iics_base_url']
     iics_username = job_run_config['iics_username']
     iics_password = job_run_config['iics_password']
     jwt_url       = job_run_config['jwt_url']
-
     current_token = headers.get("Authorization")
 
     with jwt_lock:
-
         try:
-
             if headers.get("Authorization") != current_token:
                 logger.info("Headers already refreshed by another thread - skipping!")
                 return
-
-            new_session_id, _, new_org_id = get_session_id(
-                iics_base_url,
-                iics_username,
-                iics_password
-            )
-
+            new_session_id, _, new_org_id = get_session_id(iics_base_url, iics_username, iics_password)
             new_jwt = get_jwt_token(new_session_id, jwt_url)
-
-            headers = {
-                "Authorization": f"Bearer {new_jwt}",
-                "X-INFA-ORG-ID": new_org_id,
-                "Content-Type" : "application/json"
-            }
-
+            headers = {"Authorization": f"Bearer {new_jwt}", "X-INFA-ORG-ID": new_org_id, "Content-Type": "application/json"}
             logger.info("CDGC API headers refreshed successfully!")
-
         except Exception as e:
-
             logger.error(f"Header refresh failed: {str(e)}")
-
             raise
 
 
@@ -159,7 +116,6 @@ def get_table_lineage_json(asset_id, job_run_config):
     Auto refreshes JWT on 401
     Returns response JSON
     """
-
     cdgc_base_url    = job_run_config['cdgc_base_url']
     lineage_distance = job_run_config['lineage_distance']
     api_timeout_secs = int(job_run_config['api_timeout_secs'])
@@ -177,20 +133,15 @@ def get_table_lineage_json(asset_id, job_run_config):
     resp = requests.get(url, headers=headers, verify=False, timeout=api_timeout_secs)
 
     if resp.status_code == 401:
-
         logger.warning(f"401 for asset: {asset_id} - Re-authenticating...")
-
         refresh_cdgc_api_headers(job_run_config)
-
         resp = requests.get(url, headers=headers, verify=False, timeout=api_timeout_secs)
 
     if resp.status_code != 200:
-
         try:
             error_msg = resp.json().get('message', resp.text)
         except:
             error_msg = resp.text
-
         raise Exception(f"HTTP_{resp.status_code} | {error_msg}")
 
     return resp.json()
@@ -201,20 +152,15 @@ def get_table_lineage_json(asset_id, job_run_config):
 # ============================================================
 
 def parse_lineage(asset_id, asset_name, response):
-
+    """Parse lineage section from API response"""
     rows    = []
     lineage = response.get('lineage', [])
 
     for lin in lineage:
-
         direction = lin.get('direction', '')
-
         for hop in lin.get('hops', []):
-
             distance = hop.get('distance', '')
-
             for item in hop.get('items', []):
-
                 rows.append({
                     'ASSET_ID'      : asset_id,
                     'ASSET_NAME'    : asset_name,
@@ -234,12 +180,11 @@ def parse_lineage(asset_id, asset_name, response):
 
 
 def parse_hierarchy(asset_id, asset_name, response):
-
+    """Parse hierarchy section from API response"""
     rows      = []
     hierarchy = response.get('hierarchy', [])
 
     for col in hierarchy:
-
         rows.append({
             'TABLE_ASSET_ID' : asset_id,
             'TABLE_NAME'     : asset_name,
@@ -255,14 +200,12 @@ def parse_hierarchy(asset_id, asset_name, response):
 # ============================================================
 
 def monitor_parallel_execution(job_run_config, monitor_tracker):
-
+    """Background thread monitor for ThreadPool execution"""
     log_interval_secs = int(job_run_config['log_interval_secs'])
     max_workers       = int(job_run_config['max_workers'])
 
     while monitor_tracker["is_running"]:
-
         try:
-
             total_assets = monitor_tracker["total_assets"]
             processed    = monitor_tracker["processed"]
             success      = monitor_tracker["success"]
@@ -271,25 +214,16 @@ def monitor_parallel_execution(job_run_config, monitor_tracker):
             remaining = total_assets - processed
             running   = min(max_workers, remaining)
             pending   = max(remaining - running, 0)
+            pct       = (processed / total_assets) * 100 if total_assets > 0 else 0
 
-            pct = (processed / total_assets) * 100 if total_assets > 0 else 0
-
-            elapsed_total = (
-                datetime.now() - monitor_tracker["start_time"]
-            ).total_seconds()
-
-            rate = processed / elapsed_total if elapsed_total > 0 else 0
-
-            eta_secs = (
-                (total_assets - processed) / rate
-                if rate > 0 else 0
-            )
+            elapsed_total = (datetime.now() - monitor_tracker["start_time"]).total_seconds()
+            rate          = processed / elapsed_total if elapsed_total > 0 else 0
+            eta_secs      = (total_assets - processed) / rate if rate > 0 else 0
 
             elapsed_mins = int(elapsed_total // 60)
             elapsed_secs = int(elapsed_total % 60)
-
-            eta_mins   = int(eta_secs // 60)
-            eta_secs_r = int(eta_secs % 60)
+            eta_mins     = int(eta_secs // 60)
+            eta_secs_r   = int(eta_secs % 60)
 
             logger.info(
                 f"[THREAD-MONITOR] "
@@ -307,7 +241,6 @@ def monitor_parallel_execution(job_run_config, monitor_tracker):
             threading.Event().wait(log_interval_secs)
 
         except Exception as e:
-
             logger.error(f"Monitor thread failed: {str(e)}")
 
 
@@ -316,31 +249,27 @@ def monitor_parallel_execution(job_run_config, monitor_tracker):
 # ============================================================
 
 def process_dataset_lineage(row, job_run_config):
-
+    """Process single asset"""
     asset_id   = row['ASSET_ID']
     asset_name = row['ASSET_NAME']
 
     try:
-
         logger.info(f"Processing: {asset_name} - {asset_id}")
-
-        response = get_table_lineage_json(asset_id, job_run_config)
-
+        response     = get_table_lineage_json(asset_id, job_run_config)
         lineage_rows = parse_lineage(asset_id, asset_name, response)
         column_rows  = parse_hierarchy(asset_id, asset_name, response)
+        logger.info(f"Completed: {asset_name} - Lineage: {len(lineage_rows)} - Columns: {len(column_rows)}")
 
-        logger.info(
-            f"Completed: {asset_name} - "
-            f"Lineage: {len(lineage_rows)} - "
-            f"Columns: {len(column_rows)}"
-        )
+        result = {
+            "table_lineage_data": lineage_rows,
+            "column_list_data"  : column_rows,
+            "error_log_data"    : []
+        }
 
-        return lineage_rows, column_rows, []
+        return result
 
     except Exception as e:
-
         logger.error(f"Failed: {asset_name} - {asset_id} - {str(e)}")
-
         error_row = [{
             'ASSET_ID'   : asset_id,
             'ASSET_NAME' : asset_name,
@@ -349,7 +278,13 @@ def process_dataset_lineage(row, job_run_config):
             'TIMESTAMP'  : datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }]
 
-        return [], [], error_row
+        result = {
+            "table_lineage_data": [],
+            "column_list_data"  : [],
+            "error_log_data"    : error_row
+        }
+
+        return result
 
 
 # ============================================================
@@ -357,26 +292,16 @@ def process_dataset_lineage(row, job_run_config):
 # ============================================================
 
 def parallel_run_executor(input_data, call_function_name, max_workers, job_run_config):
+    """Generic parallel executor - reusable for any parallel run"""
+    logger.info(f"Starting parallel execution - Total: {len(input_data)} - Workers: {max_workers} - Function: {call_function_name.__name__}")
 
-    logger.info(
-        f"Starting parallel execution - "
-        f"Total: {len(input_data)} - "
-        f"Workers: {max_workers} - "
-        f"Function: {call_function_name.__name__}"
-    )
+    aggregated_results = {}
+    total_assets       = len(input_data)
+    processed_count    = 0
+    success_count      = 0
+    failed_count       = 0
+    start_time         = datetime.now()
 
-    table_lineage_data = []
-    column_list_data   = []
-    error_log_data     = []
-
-    total_assets    = len(input_data)
-    processed_count = 0
-    success_count   = 0
-    failed_count    = 0
-
-    start_time = datetime.now()
-
-    # ─── LOCAL MONITOR TRACKER ───────────────────
     monitor_tracker = {
         "total_assets" : total_assets,
         "processed"    : 0,
@@ -387,108 +312,89 @@ def parallel_run_executor(input_data, call_function_name, max_workers, job_run_c
         "is_running"   : True
     }
 
-    # ─── START MONITOR THREAD ────────────────────
     monitor_thread = threading.Thread(
         target=monitor_parallel_execution,
         args=(job_run_config, monitor_tracker),
         daemon=True
     )
-
     monitor_thread.start()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-
         if hasattr(input_data, 'iterrows'):
-
-            futures = [
-                executor.submit(call_function_name, row, job_run_config)
-                for _, row in input_data.iterrows()
-            ]
-
+            futures = [executor.submit(call_function_name, row, job_run_config) for _, row in input_data.iterrows()]
         else:
-
-            futures = [
-                executor.submit(call_function_name, item, job_run_config)
-                for item in input_data
-            ]
+            futures = [executor.submit(call_function_name, item, job_run_config) for item in input_data]
 
         monitor_tracker["running"] = min(int(max_workers), total_assets)
 
         for future in concurrent.futures.as_completed(futures):
-
             try:
+                result = future.result()
 
-                lineage_rows, column_rows, error_rows = future.result()
-
-                table_lineage_data.extend(lineage_rows)
-                column_list_data.extend(column_rows)
-                error_log_data.extend(error_rows)
+                for key, value in result.items():
+                    if key not in aggregated_results:
+                        aggregated_results[key] = []
+                    aggregated_results[key].extend(value)
 
                 processed_count += 1
-                success_count   += 1 if not error_rows else 0
-                failed_count    += 1 if error_rows else 0
+                if result.get("error_log_data"):
+                    failed_count += 1
+                else:
+                    success_count += 1
 
-                # ─── MONITOR UPDATE ────────────────
                 monitor_tracker["processed"] = processed_count
                 monitor_tracker["success"]   = success_count
                 monitor_tracker["failed"]    = failed_count
 
             except Exception as e:
-
                 logger.error(f"Thread error: {str(e)}")
-
                 processed_count += 1
                 failed_count    += 1
 
-                # ─── MONITOR UPDATE ────────────────
                 monitor_tracker["processed"] = processed_count
                 monitor_tracker["success"]   = success_count
                 monitor_tracker["failed"]    = failed_count
 
-    # ─── STOP MONITOR THREAD ─────────────────────
     monitor_tracker["is_running"] = False
 
     total_time = (datetime.now() - start_time).total_seconds()
-
     total_mins = int(total_time // 60)
     total_secs = int(total_time % 60)
+    logger.info(f"Parallel execution completed - Function: {call_function_name.__name__} - Total time: {total_mins}m {total_secs}s")
 
-    logger.info(
-        f"Parallel execution completed - "
-        f"Function: {call_function_name.__name__} - "
-        f"Total time: {total_mins}m {total_secs}s"
-    )
-
-    return table_lineage_data, column_list_data, error_log_data
+    return aggregated_results
 
 
 def run_parallel(df_assets, job_run_config):
-
+    """Run parallel processing for all assets"""
     max_workers        = int(job_run_config['max_workers'])
     call_function_name = process_dataset_lineage
 
-    table_lineage_data, column_list_data, error_log_data = (
-        parallel_run_executor(
-            df_assets,
-            call_function_name,
-            max_workers,
-            job_run_config
-        )
+    results = parallel_run_executor(
+        input_data=df_assets,
+        call_function_name=call_function_name,
+        max_workers=max_workers,
+        job_run_config=job_run_config
     )
 
     logger.info("Parallel processing completed!")
 
+    table_lineage_data = results.get("table_lineage_data", [])
+    column_list_data   = results.get("column_list_data", [])
+    error_log_data     = results.get("error_log_data", [])
+
     return table_lineage_data, column_list_data, error_log_data
+
+
 # ============================================================
 # VALIDATION
 # ============================================================
 
 def validate_input_file(df):
-
+    """Validate input Excel file"""
     required_cols = ['ASSET_ID', 'ASSET_NAME', 'LINEAGE_REFRESH_FLAG']
 
     for col in required_cols:
-
         if col not in df.columns:
             raise ValueError(f"Missing column: {col}")
 
@@ -496,28 +402,15 @@ def validate_input_file(df):
         raise ValueError("Input file is empty!")
 
     dupes = df[df.duplicated(['ASSET_ID'])]
-
     if len(dupes) > 0:
-
         logger.warning(f"Duplicates found: {len(dupes)} - Removing...")
-
         df.drop_duplicates(subset=['ASSET_ID'], inplace=True)
 
     total_before = len(df)
+    df           = df[df['LINEAGE_REFRESH_FLAG'].str.upper() == 'Y']
+    total_after  = len(df)
 
-    df = df[
-        df['LINEAGE_REFRESH_FLAG'].str.upper() == 'Y'
-    ]
-
-    total_after = len(df)
-
-    logger.info(
-        f"Input validated - "
-        f"Total: {total_before} - "
-        f"To process (Y): {total_after} - "
-        f"Skipped (N): {total_before - total_after}"
-    )
-
+    logger.info(f"Input validated - Total: {total_before} - To process (Y): {total_after} - Skipped (N): {total_before - total_after}")
     return df
 
 
@@ -526,82 +419,28 @@ def validate_input_file(df):
 # ============================================================
 
 def save_output(output_path, table_lineage_data, column_list_data, error_log_data):
-
+    """Save all output files to CSV - always 3 files"""
     os.makedirs(output_path, exist_ok=True)
 
     # ─── TABLE LINEAGE ────────────────────────────
-    file = f"{output_path}/CDGC_TABLE_LVL_LINEAGE_{timestamp}.csv"
-
-    column_list = [
-        'ASSET_ID',
-        'ASSET_NAME',
-        'DIRECTION',
-        'DISTANCE',
-        'FROM_NAME',
-        'FROM_IDENTITY',
-        'FROM_TYPE',
-        'FROM_LOCATION',
-        'TO_NAME',
-        'TO_IDENTITY',
-        'TO_TYPE',
-        'TO_LOCATION'
-    ]
-
-    df_lineage = pd.DataFrame(
-        table_lineage_data,
-        columns=column_list
-    )
-
+    file        = f"{output_path}/CDGC_TABLE_LVL_LINEAGE_{timestamp}.csv"
+    column_list = ['ASSET_ID', 'ASSET_NAME', 'DIRECTION', 'DISTANCE', 'FROM_NAME', 'FROM_IDENTITY', 'FROM_TYPE', 'FROM_LOCATION', 'TO_NAME', 'TO_IDENTITY', 'TO_TYPE', 'TO_LOCATION']
+    df_lineage  = pd.DataFrame(table_lineage_data, columns=column_list)
     df_lineage.to_csv(file, index=False)
-
-    logger.info(
-        f"Table lineage saved: {file} - "
-        f"{len(df_lineage)} rows"
-    )
+    logger.info(f"Table lineage saved: {file} - {len(df_lineage)} rows")
 
     # ─── COLUMN LIST ──────────────────────────────
-    file = f"{output_path}/CDGC_TABLE_COLUMNS_{timestamp}.csv"
-
-    df_columns = pd.DataFrame(
-        column_list_data,
-        columns=[
-            'TABLE_ASSET_ID',
-            'TABLE_NAME',
-            'COL_ASSET_ID',
-            'COL_NAME'
-        ]
-    )
-
+    file       = f"{output_path}/CDGC_TABLE_COLUMNS_{timestamp}.csv"
+    df_columns = pd.DataFrame(column_list_data, columns=['TABLE_ASSET_ID', 'TABLE_NAME', 'COL_ASSET_ID', 'COL_NAME'])
     df_columns.to_csv(file, index=False)
-
-    logger.info(
-        f"Column list saved: {file} - "
-        f"{len(df_columns)} rows"
-    )
+    logger.info(f"Column list saved: {file} - {len(df_columns)} rows")
 
     # ─── ERROR LOG ────────────────────────────────
-    file = f"{output_path}/CDGC_ERROR_LOG_TABLE_LVL_{timestamp}.csv"
-
-    column_list = [
-        'ASSET_ID',
-        'ASSET_NAME',
-        'ERROR_CODE',
-        'ERROR_DESC',
-        'TIMESTAMP'
-    ]
-
-    df_errors = pd.DataFrame(
-        error_log_data,
-        columns=column_list
-    )
-
+    file        = f"{output_path}/CDGC_ERROR_LOG_TABLE_LVL_{timestamp}.csv"
+    column_list = ['ASSET_ID', 'ASSET_NAME', 'ERROR_CODE', 'ERROR_DESC', 'TIMESTAMP']
+    df_errors   = pd.DataFrame(error_log_data, columns=column_list)
     df_errors.to_csv(file, index=False)
-
-    logger.info(
-        f"Error log saved: {file} - "
-        f"{len(df_errors)} errors"
-    )
-
+    logger.info(f"Error log saved: {file} - {len(df_errors)} errors")
     logger.info("save file function run completed")
 
 
@@ -614,12 +453,7 @@ if __name__ == "__main__":
     # ─── CONFIG ───────────────────────────────────
     config      = configparser.ConfigParser()
     base_dir    = os.path.dirname(os.path.abspath(__file__))
-
-    config_path = os.environ.get(
-        "cdgc_config",
-        os.path.join(base_dir, "config/cdgc_config.ini")
-    )
-
+    config_path = os.environ.get("cdgc_config", os.path.join(base_dir, "config/cdgc_config.ini"))
     config.read(config_path)
 
     # ─── PATHS ────────────────────────────────────
@@ -629,17 +463,8 @@ if __name__ == "__main__":
 
     # ─── LOGGER ───────────────────────────────────
     os.makedirs(log_file_path, exist_ok=True)
-
-    log_file_name = (
-        f"{log_file_path}/cdgc_lineage_{timestamp}.log"
-    )
-
-    logger = get_logger(
-        name="cdgc_logger",
-        log_file=log_file_name,
-        level=logging.INFO
-    )
-
+    log_file_name = f"{log_file_path}/cdgc_lineage_{timestamp}.log"
+    logger = get_logger(name="cdgc_logger", log_file=log_file_name, level=logging.INFO)
     logger.info("=" * 60)
     logger.info("CDGC Lineage Export Started!")
     logger.info("=" * 60)
@@ -676,25 +501,15 @@ if __name__ == "__main__":
 
     # ─── LOAD & VALIDATE ──────────────────────────
     asset_file = f'{input_path}/cdgc_object_asset_list.xlsx'
-
-    df_assets = pd.read_excel(asset_file)
-
-    df_assets = validate_input_file(df_assets)
-
+    df_assets  = pd.read_excel(asset_file)
+    df_assets  = validate_input_file(df_assets)
     logger.info(f"Total assets to process: {len(df_assets)}")
 
     # ─── RUN ──────────────────────────────────────
-    table_lineage_data, column_list_data, error_log_data = (
-        run_parallel(df_assets, job_run_config)
-    )
+    table_lineage_data, column_list_data, error_log_data = run_parallel(df_assets, job_run_config)
 
     # ─── SAVE ─────────────────────────────────────
-    save_output(
-        output_path,
-        table_lineage_data,
-        column_list_data,
-        error_log_data
-    )
+    save_output(output_path, table_lineage_data, column_list_data, error_log_data)
 
     # ─── SUMMARY ──────────────────────────────────
     logger.info("=" * 60)
